@@ -61,6 +61,7 @@ jobs:
 
       - name: Run Tests
         run: |
+          set +e
           xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
@@ -72,11 +73,13 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            | tee build-test.log | xcpretty --color
+            2>&1 | tee build-test.log
           TEST_EXIT=${PIPESTATUS[0]}
           if [ $TEST_EXIT -ne 0 ]; then
             echo "=== Raw errors ==="
-            grep -i "error:" build-test.log | head -30 || true
+            grep -E "error:|error =" build-test.log | grep -v "warning:" | head -50 || true
+            echo "=== Failed commands ==="
+            grep "failed" build-test.log | head -10 || true
           fi
 
       - name: Upload Test Results
