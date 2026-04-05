@@ -24,7 +24,7 @@ enum ADBAuthType: UInt32 {
 /// Represents a single ADB protocol message
 struct ADBMessage {
     static let headerSize = 24
-    static let maxPayload: UInt32 = 256 * 1024
+    static let maxPayload: UInt32 = 1024 * 1024
     static let version: UInt32 = 0x01000000       // ADB version 1.0
 
     let command: UInt32
@@ -118,7 +118,11 @@ struct ADBMessage {
     }
 
     static func authRSAPublicKey(_ publicKey: Data) -> ADBMessage {
-        return ADBMessage(command: .auth, arg0: ADBAuthType.rsaPublic.rawValue, arg1: 0, data: publicKey)
+        var keyData = publicKey
+        if keyData.last != 0 {
+            keyData.append(0)
+        }
+        return ADBMessage(command: .auth, arg0: ADBAuthType.rsaPublic.rawValue, arg1: 0, data: keyData)
     }
 
     static func openMessage(localId: UInt32, destination: String) -> ADBMessage {

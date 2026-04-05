@@ -27,7 +27,8 @@ final class ADBCrypto {
     // MARK: - Key Management
 
     private static func generateKeyPair() throws -> (SecKey, SecKey) {
-        let attributes: [String: Any] = [
+        // Try persistent key first (stored in keychain)
+        let persistentAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeySizeInBits as String: keySizeInBits,
             kSecPrivateKeyAttrs as String: [
@@ -37,7 +38,21 @@ final class ADBCrypto {
         ]
 
         var error: Unmanaged<CFError>?
-        guard let privateKey = SecKeyCreateRandomKey(attributes as CFDictionary, &error) else {
+        if let privateKey = SecKeyCreateRandomKey(persistentAttributes as CFDictionary, &error) {
+            guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
+                throw ADBError.cryptoError("Failed to extract public key")
+            }
+            return (privateKey, publicKey)
+        }
+
+        // Fallback: generate ephemeral key without keychain (e.g. CI environment)
+        let ephemeralAttributes: [String: Any] = [
+            kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
+            kSecAttrKeySizeInBits as String: keySizeInBits
+        ]
+
+        error = nil
+        guard let privateKey = SecKeyCreateRandomKey(ephemeralAttributes as CFDictionary, &error) else {
             throw ADBError.cryptoError("Key generation failed: \(error?.takeRetainedValue().localizedDescription ?? "unknown")")
         }
 

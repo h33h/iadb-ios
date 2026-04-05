@@ -52,7 +52,9 @@ final class ADBPairing: @unchecked Sendable {
     /// Pair with an Android device using the 6-digit pairing code.
     static func pair(host: String, port: UInt16, code: String, deviceName: String = "iADB") async throws -> PeerInfo {
         let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedCode.isEmpty else {
+        // Validate pairing code: must be 6 digits
+        guard trimmedCode.count == 6,
+              trimmedCode.allSatisfy({ $0.isNumber }) else {
             throw PairingError.invalidCode
         }
 

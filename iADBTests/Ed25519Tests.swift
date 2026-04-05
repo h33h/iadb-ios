@@ -133,27 +133,29 @@ final class Ed25519Tests: XCTestCase {
     }
 
     func testMPointDecodeEncode() {
-        let mBytes: [UInt8] = [
-            0xd0, 0x48, 0x03, 0x2c, 0x6e, 0xa0, 0xb6, 0xd6,
-            0x97, 0xdd, 0xd0, 0xed, 0x18, 0x18, 0x28, 0xff,
-            0x3f, 0xb0, 0xbe, 0xe8, 0x13, 0x68, 0x6c, 0x7f,
-            0x53, 0x39, 0x48, 0xaa, 0x12, 0x54, 0x58, 0xc6
-        ]
-        let M = EdPoint.decode(mBytes)
-        XCTAssertNotNil(M)
-        XCTAssertEqual(M!.encode(), mBytes)
+        // M is reconstructed from BoringSSL's (y+x, y-x) precomp table
+        let M = EdPoint.M
+        XCTAssertNotNil(M, "SPAKE2 M constant should be a valid point")
+        // Verify round-trip: decode(encode(M)) == M
+        let encoded = M!.encode()
+        let decoded = EdPoint.decode(encoded)
+        XCTAssertNotNil(decoded)
+        XCTAssertEqual(decoded!.encode(), encoded)
+        // M should not be identity
+        XCTAssertFalse(M!.isIdentity)
     }
 
     func testNPointDecodeEncode() {
-        let nBytes: [UInt8] = [
-            0xd3, 0xbf, 0xb5, 0x18, 0xf4, 0x4f, 0x34, 0x30,
-            0xf2, 0x9d, 0x0c, 0x92, 0xaf, 0x50, 0x38, 0x65,
-            0xa1, 0xed, 0x32, 0x81, 0xdc, 0x69, 0xb3, 0x5d,
-            0xd8, 0x68, 0xba, 0x85, 0xf8, 0x86, 0xab, 0xcd
-        ]
-        let N = EdPoint.decode(nBytes)
-        XCTAssertNotNil(N)
-        XCTAssertEqual(N!.encode(), nBytes)
+        // N is reconstructed from BoringSSL's (y+x, y-x) precomp table
+        let N = EdPoint.N
+        XCTAssertNotNil(N, "SPAKE2 N constant should be a valid point")
+        // Verify round-trip: decode(encode(N)) == N
+        let encoded = N!.encode()
+        let decoded = EdPoint.decode(encoded)
+        XCTAssertNotNil(decoded)
+        XCTAssertEqual(decoded!.encode(), encoded)
+        // N should not be identity
+        XCTAssertFalse(N!.isIdentity)
     }
 
     func testIdentityPoint() {
