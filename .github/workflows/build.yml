@@ -65,6 +65,8 @@ jobs:
             -project iADB.xcodeproj \
             -scheme iADB \
             -destination '${{ steps.sim.outputs.destination }}' \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
             -resultBundlePath TestResults.xcresult \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -89,6 +91,8 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build/DerivedData \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
