@@ -11,7 +11,7 @@ options:
 packages:
   ComposableArchitecture:
     url: https://github.com/pointfreeco/swift-composable-architecture
-    from: "1.17.0"
+    minorVersion: "1.17.0"
 
 settings:
   base:

@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build & Test
+  test:
+    name: Test
     runs-on: macos-15
 
     steps:
@@ -18,12 +18,12 @@ jobs:
 
       - name: Select Xcode
         run: |
-          # List available Xcode versions and select the latest
           ls /Applications/ | grep Xcode
           XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
           echo "Using: $XCODE_PATH"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
+          swift --version
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -31,10 +31,17 @@ jobs:
       - name: Generate Xcode Project
         run: xcodegen generate
 
+      - name: Resolve SPM Dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project iADB.xcodeproj \
+            -scheme iADB \
+            -skipMacroValidation \
+            -skipPackagePluginValidation
+
       - name: Find Simulator
         id: sim
         run: |
-          # Pick the latest available iPhone simulator
           SIM_DEST=$(xcrun simctl list devices available -j \
             | python3 -c "
           import json, sys, re
@@ -59,28 +66,57 @@ jobs:
           echo "destination=$SIM_DEST" >> "$GITHUB_OUTPUT"
           echo "Using simulator: $SIM_DEST"
 
+      - name: Build for Testing
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project iADB.xcodeproj \
+            -scheme iADB \
+            -destination '${{ steps.sim.outputs.destination }}' \
+            -skipMacroValidation \
+            -skipPackagePluginValidation \
+            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee build-test.log
+          echo "Test build succeeded"
+
+      - name: Show build errors on failure
+        if: failure()
+        run: |
+          echo "::group::Compilation errors"
+          grep -E "error:" build-test.log | grep -v "warning:" | head -100 || true
+          echo "::endgroup::"
+          echo "::group::Build failures"
+          grep -iE "build failed|failed to build|compilation error" build-test.log | head -20 || true
+          echo "::endgroup::"
+
       - name: Run Tests
         run: |
-          set +e
-          xcodebuild test \
+          set -o pipefail
+          xcodebuild test-without-building \
             -project iADB.xcodeproj \
             -scheme iADB \
             -destination '${{ steps.sim.outputs.destination }}' \
             -skipMacroValidation \
             -skipPackagePluginValidation \
             -resultBundlePath TestResults.xcresult \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee build-test.log
-          TEST_EXIT=${PIPESTATUS[0]}
-          if [ $TEST_EXIT -ne 0 ]; then
-            echo "=== Raw errors ==="
-            grep -E "error:|error =" build-test.log | grep -v "warning:" | head -50 || true
-            echo "=== Failed commands ==="
-            grep "failed" build-test.log | head -10 || true
-          fi
+            2>&1 | tee test-run.log
+          echo "Tests passed"
+
+      - name: Show test failures
+        if: failure()
+        run: |
+          echo "::group::Test errors"
+          grep -E "error:" test-run.log 2>/dev/null | head -50 || true
+          echo "::endgroup::"
+          echo "::group::Failed tests"
+          grep -E "Test Case.*failed|Executed.*with.*failure" test-run.log 2>/dev/null | head -20 || true
+          echo "::endgroup::"
 
       - name: Upload Test Results
         if: always()
@@ -89,6 +125,28 @@ jobs:
           name: test-results
           path: TestResults.xcresult
           retention-days: 7
+          if-no-files-found: ignore
+
+  build:
+    name: Build IPA
+    runs-on: macos-15
+    needs: test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
 
       - name: Build Release (unsigned)
         run: |
@@ -113,12 +171,13 @@ jobs:
 
       - name: Show build log on failure
         if: failure()
-        run: cat build/xcodebuild.log || true
+        run: |
+          echo "::group::Build errors"
+          grep -E "error:" build/xcodebuild.log | grep -v "warning:" | head -100 || true
+          echo "::endgroup::"
 
       - name: Create Unsigned IPA
         run: |
-          echo "=== Searching for .app bundle ==="
-          find build/DerivedData -name "*.app" -type d 2>/dev/null || true
           APP_PATH=$(find build/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
           if [ -z "$APP_PATH" ]; then
             echo "ERROR: iADB.app not found in build/DerivedData"
@@ -138,18 +197,3 @@ jobs:
           name: iADB-unsigned
           path: build/iADB-unsigned.ipa
           retention-days: 30
-
-  build-summary:
-    name: Build Summary
-    runs-on: macos-15
-    needs: build
-    if: always()
-    steps:
-      - name: Report Status
-        run: |
-          if [ "${{ needs.build.result }}" == "success" ]; then
-            echo "Build and tests passed successfully!"
-          else
-            echo "Build or tests failed."
-            exit 1
-          fi
