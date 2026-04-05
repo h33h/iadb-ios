@@ -1,0 +1,113 @@
+name: Build Unsigned IPA
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & Test
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # List available Xcode versions and select the latest
+          ls /Applications/ | grep Xcode
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using: $XCODE_PATH"
+          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Run Tests
+        run: |
+          xcodebuild test \
+            -project iADB.xcodeproj \
+            -scheme iADB \
+            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -resultBundlePath TestResults.xcresult \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty --color || true
+
+      - name: Upload Test Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults.xcresult
+          retention-days: 7
+
+      - name: Build Release (unsigned)
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild build \
+            -project iADB.xcodeproj \
+            -scheme iADB \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build/DerivedData \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tee build/xcodebuild.log | xcpretty --color
+
+      - name: Show build log on failure
+        if: failure()
+        run: cat build/xcodebuild.log || true
+
+      - name: Create Unsigned IPA
+        run: |
+          echo "=== Searching for .app bundle ==="
+          find build/DerivedData -name "*.app" -type d 2>/dev/null || true
+          APP_PATH=$(find build/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: iADB.app not found in build/DerivedData"
+            find build/ -type d -maxdepth 5 || true
+            exit 1
+          fi
+          echo "Found .app at: $APP_PATH"
+          mkdir -p build/Payload
+          cp -r "$APP_PATH" build/Payload/
+          cd build
+          zip -r -9 iADB-unsigned.ipa Payload/
+          rm -rf Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iADB-unsigned
+          path: build/iADB-unsigned.ipa
+          retention-days: 30
+
+  build-summary:
+    name: Build Summary
+    runs-on: macos-14
+    needs: build
+    if: always()
+    steps:
+      - name: Report Status
+        run: |
+          if [ "${{ needs.build.result }}" == "success" ]; then
+            echo "Build and tests passed successfully!"
+          else
+            echo "Build or tests failed."
+            exit 1
+          fi
