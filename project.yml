@@ -85,6 +85,14 @@ targets:
     dependencies:
       - target: iADB
       - package: ComposableArchitecture
+      - package: swift-case-paths
+        product: CasePaths
+      - package: swift-dependencies
+        product: Dependencies
+      - package: swift-concurrency-extras
+        product: ConcurrencyExtras
+      - package: xctest-dynamic-overlay
+        product: XCTestDynamicOverlay
 
 schemes:
   iADB:
