@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import Foundation
 import UIKit
 import Testing
 @testable import iADB
