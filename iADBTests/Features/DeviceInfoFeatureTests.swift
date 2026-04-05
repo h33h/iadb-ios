@@ -79,7 +79,9 @@ struct DeviceInfoFeatureTests {
         }
 
         await store.send(.reboot(mode: "recovery"))
-        await store.receive(\.rebootResult.success)
+        // Use \.rebootResult (not .success) to work around Swift 6.2 compiler crash
+        // in key path IR generation for Result<Void, Error>
+        await store.receive(\.rebootResult)
         #expect(rebootMode == "recovery")
     }
 
@@ -92,7 +94,7 @@ struct DeviceInfoFeatureTests {
         }
 
         await store.send(.reboot(mode: ""))
-        await store.receive(\.rebootResult.failure) {
+        await store.receive(\.rebootResult) {
             $0.errorMessage = ADBError.notConnected.localizedDescription
         }
     }

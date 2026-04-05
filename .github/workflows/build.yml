@@ -1,4 +1,4 @@
-name: Build Unsigned IPA
+name: Build & Test
 
 on:
   push:
@@ -9,97 +9,64 @@ on:
 
 jobs:
   build:
-    name: Build & Test
     runs-on: macos-15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Setup
+        id: setup
         run: |
-          # List available Xcode versions and select the latest
-          ls /Applications/ | grep Xcode
+          # Select latest Xcode
           XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-          echo "Using: $XCODE_PATH"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+          # Install XcodeGen & generate project
+          brew install xcodegen
+          xcodegen generate
 
-      - name: Generate Xcode Project
-        run: xcodegen generate
-
-      - name: Find Simulator
-        id: sim
-        run: |
-          # Pick the latest available iPhone simulator
-          SIM_DEST=$(xcrun simctl list devices available -j \
-            | python3 -c "
+          # Find best simulator
+          SIM_DEST=$(xcrun simctl list devices available -j | python3 -c "
           import json, sys, re
           data = json.load(sys.stdin)
           best = None
           for runtime, devices in data['devices'].items():
-              if 'iOS' not in runtime:
-                  continue
+              if 'iOS' not in runtime: continue
               m = re.search(r'(\d+)[-.](\d+)', runtime)
-              if not m:
-                  continue
+              if not m: continue
               ver = (int(m.group(1)), int(m.group(2)))
               for d in devices:
                   if 'iPhone' in d['name'] and d['isAvailable']:
-                      if best is None or ver > best[0] or (ver == best[0] and d['name'] > best[1]):
+                      if best is None or ver > best[0]:
                           best = (ver, d['name'], d['udid'])
-          if best:
-              print(f'platform=iOS Simulator,id={best[2]}')
-          else:
-              print('platform=iOS Simulator,name=iPhone 16')
+          print(f'platform=iOS Simulator,id={best[2]}' if best else 'platform=iOS Simulator,name=iPhone 16')
           ")
           echo "destination=$SIM_DEST" >> "$GITHUB_OUTPUT"
-          echo "Using simulator: $SIM_DEST"
 
-      - name: Run Tests
+      - name: Test
         run: |
-          set +e
+          set -o pipefail
           xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
-            -destination '${{ steps.sim.outputs.destination }}' \
+            -destination '${{ steps.setup.outputs.destination }}' \
             -skipMacroValidation \
             -skipPackagePluginValidation \
-            -resultBundlePath TestResults.xcresult \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee build-test.log
-          TEST_EXIT=${PIPESTATUS[0]}
-          if [ $TEST_EXIT -ne 0 ]; then
-            echo "=== Raw errors ==="
-            grep -E "error:|error =" build-test.log | grep -v "warning:" | head -50 || true
-            echo "=== Failed commands ==="
-            grep "failed" build-test.log | head -10 || true
-          fi
+            2>&1 | tee test.log
 
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: TestResults.xcresult
-          retention-days: 7
-
-      - name: Build Release (unsigned)
+      - name: Build Release & Package IPA
         run: |
           set -o pipefail
-          mkdir -p build
           xcodebuild build \
             -project iADB.xcodeproj \
             -scheme iADB \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build/DerivedData \
             -skipMacroValidation \
             -skipPackagePluginValidation \
             ONLY_ACTIVE_ARCH=NO \
@@ -109,47 +76,16 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
-            2>&1 | tee build/xcodebuild.log | xcpretty --color
+            2>&1 | tee build.log | xcpretty --color
 
-      - name: Show build log on failure
-        if: failure()
-        run: cat build/xcodebuild.log || true
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
+          [ -z "$APP_PATH" ] && echo "ERROR: iADB.app not found" && exit 1
+          mkdir -p Payload && cp -r "$APP_PATH" Payload/
+          zip -r -9 iADB-unsigned.ipa Payload/ && rm -rf Payload
 
-      - name: Create Unsigned IPA
-        run: |
-          echo "=== Searching for .app bundle ==="
-          find build/DerivedData -name "*.app" -type d 2>/dev/null || true
-          APP_PATH=$(find build/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: iADB.app not found in build/DerivedData"
-            find build/ -type d -maxdepth 5 || true
-            exit 1
-          fi
-          echo "Found .app at: $APP_PATH"
-          mkdir -p build/Payload
-          cp -r "$APP_PATH" build/Payload/
-          cd build
-          zip -r -9 iADB-unsigned.ipa Payload/
-          rm -rf Payload
-
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: iADB-unsigned
-          path: build/iADB-unsigned.ipa
+          path: iADB-unsigned.ipa
           retention-days: 30
-
-  build-summary:
-    name: Build Summary
-    runs-on: macos-15
-    needs: build
-    if: always()
-    steps:
-      - name: Report Status
-        run: |
-          if [ "${{ needs.build.result }}" == "success" ]; then
-            echo "Build and tests passed successfully!"
-          else
-            echo "Build or tests failed."
-            exit 1
-          fi

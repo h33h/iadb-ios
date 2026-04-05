@@ -19,12 +19,14 @@ struct ScreenshotFeatureTests {
     func takeScreenshotSuccess() async {
         let imageData = Self.testImageData
         let testUUID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let testDate = Date(timeIntervalSince1970: 1000)
 
         let store = TestStore(initialState: ScreenshotFeature.State()) {
             ScreenshotFeature()
         } withDependencies: {
             $0.adbClient.takeScreenshot = { imageData }
             $0.uuid = .constant(testUUID)
+            $0.date = .constant(testDate)
         }
 
         await store.send(.takeScreenshot) {
@@ -34,9 +36,9 @@ struct ScreenshotFeatureTests {
 
         await store.receive(\.screenshotCaptured.success) {
             $0.isCapturing = false
-            #expect($0.screenshots.count == 1)
-            #expect($0.screenshots[0].id == testUUID)
-            #expect($0.screenshots[0].data == imageData)
+            $0.screenshots = [
+                ScreenshotFeature.ScreenshotEntry(id: testUUID, timestamp: testDate, data: imageData)
+            ]
         }
     }
 
