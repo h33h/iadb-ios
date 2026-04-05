@@ -34,7 +34,10 @@ final class SPAKE2Tests: XCTestCase {
 
     func testSPAKE2ClientRejectsInvalidPoint() throws {
         let client = try SPAKE2Client(password: Data("123456".utf8))
-        let badPoint = [UInt8](repeating: 0xFF, count: 32)
+        // y=1 with sign bit set: x would need to be 0 but sign=1 is invalid for x=0
+        var badPoint = [UInt8](repeating: 0, count: 32)
+        badPoint[0] = 1
+        badPoint[31] = 0x80  // set sign bit for x, but x=0 for y=1 → invalid
         XCTAssertThrowsError(try client.processServerMessage(Data(badPoint)))
     }
 

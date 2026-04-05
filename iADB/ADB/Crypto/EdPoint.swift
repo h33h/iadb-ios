@@ -36,27 +36,56 @@ struct EdPoint {
         return decode(bytes)!
     }()
 
-    // SPAKE2 M constant from BoringSSL
+    // SPAKE2 M constant from BoringSSL (kSpakeMSmallPrecomp).
+    // BoringSSL stores precomputed tables as (y+x, y-x) field element pairs,
+    // NOT compressed Ed25519 points. We reconstruct M from both components.
     static let M: EdPoint? = {
-        let bytes: [UInt8] = [
+        let ypxBytes: [UInt8] = [
             0xd0, 0x48, 0x03, 0x2c, 0x6e, 0xa0, 0xb6, 0xd6,
             0x97, 0xdd, 0xd0, 0xed, 0x18, 0x18, 0x28, 0xff,
             0x3f, 0xb0, 0xbe, 0xe8, 0x13, 0x68, 0x6c, 0x7f,
             0x53, 0x39, 0x48, 0xaa, 0x12, 0x54, 0x58, 0xc6
         ]
-        return decode(bytes)
+        let ymxBytes: [UInt8] = [
+            0x4a, 0xf2, 0x7c, 0xe0, 0xed, 0xf1, 0xa2, 0xe4,
+            0x3c, 0xb9, 0xf5, 0x83, 0x44, 0x6a, 0x62, 0x09,
+            0xf9, 0x2f, 0xd5, 0x0c, 0x23, 0x00, 0x79, 0x2e,
+            0x4d, 0xa4, 0x0f, 0xec, 0xaa, 0xa5, 0x37, 0x02
+        ]
+        return fromPrecomp(ypxBytes: ypxBytes, ymxBytes: ymxBytes)
     }()
 
-    // SPAKE2 N constant from BoringSSL
+    // SPAKE2 N constant from BoringSSL (kSpakeNSmallPrecomp).
     static let N: EdPoint? = {
-        let bytes: [UInt8] = [
+        let ypxBytes: [UInt8] = [
             0xd3, 0xbf, 0xb5, 0x18, 0xf4, 0x4f, 0x34, 0x30,
             0xf2, 0x9d, 0x0c, 0x92, 0xaf, 0x50, 0x38, 0x65,
             0xa1, 0xed, 0x32, 0x81, 0xdc, 0x69, 0xb3, 0x5d,
             0xd8, 0x68, 0xba, 0x85, 0xf8, 0x86, 0xab, 0xcd
         ]
-        return decode(bytes)
+        let ymxBytes: [UInt8] = [
+            0xc6, 0x0d, 0x46, 0x08, 0x8c, 0x22, 0xa0, 0x40,
+            0xa4, 0x59, 0x42, 0x92, 0x54, 0x93, 0x40, 0x3c,
+            0x40, 0x86, 0x2f, 0x0e, 0xfa, 0xfb, 0x0d, 0xcc,
+            0x0a, 0x0f, 0x91, 0x38, 0x49, 0x69, 0x90, 0x4b
+        ]
+        return fromPrecomp(ypxBytes: ypxBytes, ymxBytes: ymxBytes)
     }()
+
+    /// Reconstruct an EdPoint from BoringSSL's precomputed (y+x, y-x) pair.
+    private static func fromPrecomp(ypxBytes: [UInt8], ymxBytes: [UInt8]) -> EdPoint? {
+        let ypx = FieldElement.decode(ypxBytes)
+        let ymx = FieldElement.decode(ymxBytes)
+        // inv2 = 1/2 mod p = (p+1)/2
+        let inv2 = FieldElement(l0: 2, l1: 0, l2: 0, l3: 0, l4: 0).invert()
+        let y = (ypx + ymx) * inv2
+        let x = (ypx - ymx) * inv2
+        let point = EdPoint(X: x, Y: y, Z: .one, T: x * y)
+        // Verify the point is on the curve
+        let encoded = point.encode()
+        guard let decoded = decode(encoded) else { return nil }
+        return decoded
+    }
 
     // sqrt(-1) mod p, needed for point decompression
     // = 2^((p-1)/4) mod p
