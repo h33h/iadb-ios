@@ -243,7 +243,9 @@ struct FileManagerFeatureTests {
 
         await store.send(.deleteFile(file))
 
-        await store.receive(\.operationCompleted.success) {
+        // Use \.operationCompleted (not .success drill-down) to work around
+        // Swift 6.2 compiler crash in key path IR generation for Result<Void, Error>
+        await store.receive(\.operationCompleted) {
             $0.isLoading = false
         }
 
@@ -272,7 +274,7 @@ struct FileManagerFeatureTests {
 
         await store.send(.createDirectory(name: "NewFolder"))
 
-        await store.receive(\.operationCompleted.success) {
+        await store.receive(\.operationCompleted) {
             $0.isLoading = false
         }
 
@@ -303,7 +305,7 @@ struct FileManagerFeatureTests {
             $0.isLoading = true
         }
 
-        await store.receive(\.operationCompleted.success) {
+        await store.receive(\.operationCompleted) {
             $0.isLoading = false
         }
 
