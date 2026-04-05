@@ -44,8 +44,11 @@ struct SPAKE2Client {
         self.x = xScalar
 
         // Compute T = x·B + w·M
+        guard let M = EdPoint.M else {
+            throw SPAKE2Error.invalidMessage("Failed to decode SPAKE2 M constant")
+        }
         let xB = EdPoint.B.scalarMult(x)
-        let wM = EdPoint.M.scalarMult(wScalar)
+        let wM = M.scalarMult(wScalar)
         let pointT = xB.add(wM)
         self.outgoingMessage = Data(pointT.encode())
     }
@@ -61,7 +64,10 @@ struct SPAKE2Client {
         }
 
         // Compute K = x · (S - w·N)
-        let wN = EdPoint.N.scalarMult(wScalar)
+        guard let N = EdPoint.N else {
+            throw SPAKE2Error.invalidMessage("Failed to decode SPAKE2 N constant")
+        }
+        let wN = N.scalarMult(wScalar)
         let sMinusWN = pointS.add(wN.negate())
         let pointK = sMinusWN.scalarMult(x)
 
