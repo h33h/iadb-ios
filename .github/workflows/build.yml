@@ -1,4 +1,4 @@
-name: Build Unsigned IPA
+name: Build & Test
 
 on:
   push:
@@ -9,111 +9,60 @@ on:
 
 jobs:
   build:
-    name: Build & Test
     runs-on: macos-15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Select Xcode
+      - name: Setup
+        id: setup
         run: |
-          ls /Applications/ | grep Xcode
+          # Select latest Xcode
           XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-          echo "Using: $XCODE_PATH"
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
-          swift --version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+          # Install XcodeGen & generate project
+          brew install xcodegen
+          xcodegen generate
 
-      - name: Generate Xcode Project
-        run: xcodegen generate
-
-      - name: Resolve SPM Dependencies
-        run: |
-          xcodebuild -resolvePackageDependencies \
-            -project iADB.xcodeproj \
-            -scheme iADB \
-            -skipMacroValidation \
-            -skipPackagePluginValidation
-
-      - name: Find Simulator
-        id: sim
-        run: |
-          SIM_DEST=$(xcrun simctl list devices available -j \
-            | python3 -c "
+          # Find best simulator
+          SIM_DEST=$(xcrun simctl list devices available -j | python3 -c "
           import json, sys, re
           data = json.load(sys.stdin)
           best = None
           for runtime, devices in data['devices'].items():
-              if 'iOS' not in runtime:
-                  continue
+              if 'iOS' not in runtime: continue
               m = re.search(r'(\d+)[-.](\d+)', runtime)
-              if not m:
-                  continue
+              if not m: continue
               ver = (int(m.group(1)), int(m.group(2)))
               for d in devices:
                   if 'iPhone' in d['name'] and d['isAvailable']:
-                      if best is None or ver > best[0] or (ver == best[0] and d['name'] > best[1]):
+                      if best is None or ver > best[0]:
                           best = (ver, d['name'], d['udid'])
-          if best:
-              print(f'platform=iOS Simulator,id={best[2]}')
-          else:
-              print('platform=iOS Simulator,name=iPhone 16')
+          print(f'platform=iOS Simulator,id={best[2]}' if best else 'platform=iOS Simulator,name=iPhone 16')
           ")
           echo "destination=$SIM_DEST" >> "$GITHUB_OUTPUT"
-          echo "Using simulator: $SIM_DEST"
 
-      - name: Build for Testing
+      - name: Test
         run: |
           set -o pipefail
-          xcodebuild build-for-testing \
+          xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
-            -destination '${{ steps.sim.outputs.destination }}' \
+            -destination '${{ steps.setup.outputs.destination }}' \
             -skipMacroValidation \
             -skipPackagePluginValidation \
+            -resultBundlePath TestResults.xcresult \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee build-test.log
-          echo "Test build succeeded"
+            2>&1 | tee test.log
 
-      - name: Show build errors
+      - name: Show errors
         if: failure()
-        run: |
-          echo "::group::Compilation errors"
-          grep -E "error:" build-test.log | grep -v "warning:" | head -100 || true
-          echo "::endgroup::"
-
-      - name: Run Tests
-        run: |
-          set -o pipefail
-          xcodebuild test-without-building \
-            -project iADB.xcodeproj \
-            -scheme iADB \
-            -destination '${{ steps.sim.outputs.destination }}' \
-            -skipMacroValidation \
-            -skipPackagePluginValidation \
-            -resultBundlePath TestResults.xcresult \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee test-run.log
-          echo "Tests passed"
-
-      - name: Show test failures
-        if: failure()
-        run: |
-          echo "::group::Test errors"
-          grep -E "error:" test-run.log 2>/dev/null | head -50 || true
-          echo "::endgroup::"
-          echo "::group::Failed tests"
-          grep -E "Test Case.*failed|Executed.*with.*failure" test-run.log 2>/dev/null | head -20 || true
-          echo "::endgroup::"
+        run: grep -E "error:|Test Case.*failed" test.log 2>/dev/null | head -50 || true
 
       - name: Upload Test Results
         if: always()
@@ -124,10 +73,9 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-      - name: Build Release (unsigned)
+      - name: Build Release & Package IPA
         run: |
           set -o pipefail
-          mkdir -p build
           xcodebuild build \
             -project iADB.xcodeproj \
             -scheme iADB \
@@ -142,32 +90,16 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
-            2>&1 | tee build/xcodebuild.log | xcpretty --color
+            2>&1 | tee build.log | xcpretty --color
 
-      - name: Show release build errors
-        if: failure()
-        run: |
-          echo "::group::Build errors"
-          grep -E "error:" build/xcodebuild.log | grep -v "warning:" | head -100 || true
-          echo "::endgroup::"
-
-      - name: Create Unsigned IPA
-        run: |
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
-          if [ -z "$APP_PATH" ]; then
-            echo "ERROR: iADB.app not found"
-            exit 1
-          fi
-          echo "Found .app at: $APP_PATH"
-          mkdir -p build/Payload
-          cp -r "$APP_PATH" build/Payload/
-          cd build
-          zip -r -9 iADB-unsigned.ipa Payload/
-          rm -rf Payload
+          [ -z "$APP_PATH" ] && echo "ERROR: iADB.app not found" && exit 1
+          mkdir -p Payload && cp -r "$APP_PATH" Payload/
+          zip -r -9 iADB-unsigned.ipa Payload/ && rm -rf Payload
 
-      - name: Upload IPA Artifact
+      - name: Upload IPA
         uses: actions/upload-artifact@v4
         with:
           name: iADB-unsigned
-          path: build/iADB-unsigned.ipa
+          path: iADB-unsigned.ipa
           retention-days: 30
