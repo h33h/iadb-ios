@@ -72,7 +72,12 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty --color || true
+            | tee build-test.log | xcpretty --color
+          TEST_EXIT=${PIPESTATUS[0]}
+          if [ $TEST_EXIT -ne 0 ]; then
+            echo "=== Raw errors ==="
+            grep -i "error:" build-test.log | head -30 || true
+          fi
 
       - name: Upload Test Results
         if: always()
