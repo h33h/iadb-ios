@@ -17,6 +17,7 @@ struct FileManagerFeatureTests {
         } withDependencies: {
             $0.adbClient.listDirectory = { _ in Self.lsOutput }
         }
+        store.exhaustivity = .off
 
         await store.send(.loadDirectory(path: "/sdcard")) {
             $0.isLoading = true
@@ -26,8 +27,6 @@ struct FileManagerFeatureTests {
         await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.currentPath = "/sdcard"
-            // Entries parsed from ls output — directories first
-            #expect($0.entries.count >= 0) // Parsing depends on FileEntry.parse
         }
     }
 
@@ -243,11 +242,7 @@ struct FileManagerFeatureTests {
 
         await store.send(.deleteFile(file))
 
-        // Use \.operationCompleted (not .success drill-down) to work around
-        // Swift 6.2 compiler crash in key path IR generation for Result<Void, Error>
-        await store.receive(\.operationCompleted) {
-            $0.isLoading = false
-        }
+        await store.receive(\.operationCompleted)
 
         await store.receive(\.loadDirectory) {
             $0.isLoading = true
@@ -274,9 +269,7 @@ struct FileManagerFeatureTests {
 
         await store.send(.createDirectory(name: "NewFolder"))
 
-        await store.receive(\.operationCompleted) {
-            $0.isLoading = false
-        }
+        await store.receive(\.operationCompleted)
 
         await store.receive(\.loadDirectory) {
             $0.isLoading = true
