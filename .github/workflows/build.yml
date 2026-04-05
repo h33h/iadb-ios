@@ -53,25 +53,11 @@ jobs:
             -destination '${{ steps.setup.outputs.destination }}' \
             -skipMacroValidation \
             -skipPackagePluginValidation \
-            -resultBundlePath TestResults.xcresult \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee test.log
-
-      - name: Show errors
-        if: failure()
-        run: grep -E "error:|Test Case.*failed" test.log 2>/dev/null | head -50 || true
-
-      - name: Upload Test Results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results
-          path: TestResults.xcresult
-          retention-days: 7
-          if-no-files-found: ignore
 
       - name: Build Release & Package IPA
         run: |
