@@ -1,4 +1,5 @@
 import ComposableArchitecture
+import Foundation
 import Testing
 @testable import iADB
 
@@ -22,7 +23,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.currentPath = "/sdcard"
             // Entries parsed from ls output — directories first
@@ -43,7 +44,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.failure) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.errorMessage = ADBError.notConnected.localizedDescription
         }
@@ -80,7 +81,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.currentPath = "/sdcard/Downloads"
             $0.entries = []
@@ -134,7 +135,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.currentPath = "/sdcard"
             $0.entries = []
@@ -163,7 +164,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.currentPath = "/sdcard"
             $0.entries = []
@@ -251,7 +252,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.entries = []
         }
@@ -280,7 +281,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.entries = []
         }
@@ -311,7 +312,7 @@ struct FileManagerFeatureTests {
             $0.errorMessage = nil
         }
 
-        await store.receive(\.directoryLoaded.success) {
+        await store.receive(\.directoryLoaded) {
             $0.isLoading = false
             $0.entries = []
         }
