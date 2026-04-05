@@ -36,7 +36,7 @@ jobs:
           xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
-            -destination 'platform=iOS Simulator,name=iPhone 15,OS=latest' \
+            -destination 'generic/platform=iOS Simulator' \
             -resultBundlePath TestResults.xcresult \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
