@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  test:
-    name: Test
+  build:
+    name: Build & Test
     runs-on: macos-15
 
     steps:
@@ -82,14 +82,11 @@ jobs:
             2>&1 | tee build-test.log
           echo "Test build succeeded"
 
-      - name: Show build errors on failure
+      - name: Show build errors
         if: failure()
         run: |
           echo "::group::Compilation errors"
           grep -E "error:" build-test.log | grep -v "warning:" | head -100 || true
-          echo "::endgroup::"
-          echo "::group::Build failures"
-          grep -iE "build failed|failed to build|compilation error" build-test.log | head -20 || true
           echo "::endgroup::"
 
       - name: Run Tests
@@ -127,27 +124,6 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  build:
-    name: Build IPA
-    runs-on: macos-15
-    needs: test
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
-          xcodebuild -version
-
-      - name: Install XcodeGen
-        run: brew install xcodegen
-
-      - name: Generate Xcode Project
-        run: xcodegen generate
-
       - name: Build Release (unsigned)
         run: |
           set -o pipefail
@@ -157,7 +133,6 @@ jobs:
             -scheme iADB \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build/DerivedData \
             -skipMacroValidation \
             -skipPackagePluginValidation \
             ONLY_ACTIVE_ARCH=NO \
@@ -169,7 +144,7 @@ jobs:
             DEVELOPMENT_TEAM="" \
             2>&1 | tee build/xcodebuild.log | xcpretty --color
 
-      - name: Show build log on failure
+      - name: Show release build errors
         if: failure()
         run: |
           echo "::group::Build errors"
@@ -178,10 +153,9 @@ jobs:
 
       - name: Create Unsigned IPA
         run: |
-          APP_PATH=$(find build/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
           if [ -z "$APP_PATH" ]; then
-            echo "ERROR: iADB.app not found in build/DerivedData"
-            find build/ -type d -maxdepth 5 || true
+            echo "ERROR: iADB.app not found"
             exit 1
           fi
           echo "Found .app at: $APP_PATH"
