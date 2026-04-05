@@ -68,7 +68,7 @@ targets:
       - package: swift-concurrency-extras
         product: ConcurrencyExtras
       - package: xctest-dynamic-overlay
-        product: IssueReporting
+        product: XCTestDynamicOverlay
 
   iADBTests:
     type: bundle.unit-test
