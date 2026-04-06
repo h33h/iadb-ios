@@ -170,6 +170,7 @@ final class ADBPairing: @unchecked Sendable {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var resumed = false
+            var lastWaitingError: NWError?
             let lock = NSLock()
 
             func safeResume(_ block: () -> Void) {
@@ -185,15 +186,13 @@ final class ADBPairing: @unchecked Sendable {
                 case .ready:
                     safeResume { continuation.resume() }
                 case .waiting(let error):
-                    // Connection cannot proceed — typically Local Network
-                    // permission denied or network unreachable.
-                    // Fail fast instead of waiting for the timeout.
-                    safeResume {
-                        connection.cancel()
-                        continuation.resume(throwing: PairingError.connectionFailed(
-                            "Network unavailable (\(error.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
-                        ))
-                    }
+                    // NWConnection enters .waiting during TLS with self-signed
+                    // certs before the verify block runs. Do NOT fail here —
+                    // the verify block will accept the cert and move to .ready.
+                    // Store the error so we can report it if the timeout fires.
+                    lock.lock()
+                    lastWaitingError = error
+                    lock.unlock()
                 case .failed(let error):
                     safeResume { continuation.resume(throwing: PairingError.tlsFailed(error.localizedDescription)) }
                 case .cancelled:
@@ -207,7 +206,16 @@ final class ADBPairing: @unchecked Sendable {
             queue.asyncAfter(deadline: .now() + tlsTimeout) {
                 safeResume {
                     connection.cancel()
-                    continuation.resume(throwing: PairingError.timeout)
+                    lock.lock()
+                    let waitErr = lastWaitingError
+                    lock.unlock()
+                    if let waitErr = waitErr {
+                        continuation.resume(throwing: PairingError.connectionFailed(
+                            "Connection stuck (\(waitErr.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
+                        ))
+                    } else {
+                        continuation.resume(throwing: PairingError.timeout)
+                    }
                 }
             }
         }
