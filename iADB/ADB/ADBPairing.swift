@@ -62,12 +62,18 @@ final class ADBPairing: @unchecked Sendable {
         let crypto = try ADBCrypto()
         let publicKeyData = try crypto.adbPublicKey()
 
-        // Step 1: TLS connection
-        let (connection, queue) = try await connectTLS(host: host, port: port)
+        // AOSP pairing requires mutual TLS — generate client identity
+        let identity = try crypto.tlsIdentity()
+
+        // Step 1: TLS connection (with client certificate for mTLS)
+        let (connection, queue, exportedKey) = try await connectTLS(host: host, port: port, identity: identity)
         defer { connection.cancel() }
 
         // Step 2: SPAKE2 key exchange
-        let passwordData = Data(trimmedCode.utf8)
+        // AOSP appends TLS exported keying material to the pairing code:
+        //   pswd = pairing_code_bytes + tls_exported_key_material(64 bytes)
+        var passwordData = Data(trimmedCode.utf8)
+        passwordData.append(exportedKey)
         let spake2: SPAKE2Client
         do {
             spake2 = try SPAKE2Client(password: passwordData)
@@ -140,15 +146,31 @@ final class ADBPairing: @unchecked Sendable {
 
     // MARK: - TLS Connection
 
-    private static func connectTLS(host: String, port: UInt16) async throws -> (NWConnection, DispatchQueue) {
+    private static let tlsTimeout: TimeInterval = 30
+    private static let receiveTimeout: TimeInterval = 15
+
+    private static let exportedKeySize = 64
+    // AOSP uses sizeof("adb-label") = 10, which includes the null terminator
+    private static let exportedKeyLabel = "adb-label"
+    private static let exportedKeyLabelSize = 10 // strlen + 1 (null), matches AOSP sizeof()
+
+    private static func connectTLS(host: String, port: UInt16, identity: SecIdentity) async throws -> (NWConnection, DispatchQueue, Data) {
         let queue = DispatchQueue(label: "com.iadb.pairing")
 
         let tlsOptions = NWProtocolTLS.Options()
 
+        // Capture TLS metadata for exporting keying material after handshake.
+        // AOSP appends TLS EKM to the SPAKE2 password.
+        let metadataLock = NSLock()
+        var capturedMetadata: sec_protocol_metadata_t?
+
         // Accept self-signed certificates (ADB uses self-signed)
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
-            { _, _, completionHandler in
+            { metadata, _, completionHandler in
+                metadataLock.lock()
+                capturedMetadata = metadata
+                metadataLock.unlock()
                 completionHandler(true)
             },
             queue
@@ -160,6 +182,16 @@ final class ADBPairing: @unchecked Sendable {
             .TLSv13
         )
 
+        // Provide client certificate for mutual TLS.
+        // AOSP sets SSL_VERIFY_FAIL_IF_NO_PEER_CERT — server rejects clients without a cert.
+        guard let secIdentity = sec_identity_create(identity) else {
+            throw PairingError.tlsFailed("Failed to create sec_identity_t from SecIdentity")
+        }
+        sec_protocol_options_set_local_identity(
+            tlsOptions.securityProtocolOptions,
+            secIdentity
+        )
+
         let parameters = NWParameters(tls: tlsOptions)
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(rawValue: port)!
@@ -167,6 +199,7 @@ final class ADBPairing: @unchecked Sendable {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             var resumed = false
+            var lastWaitingError: NWError?
             let lock = NSLock()
 
             func safeResume(_ block: () -> Void) {
@@ -181,6 +214,14 @@ final class ADBPairing: @unchecked Sendable {
                 switch state {
                 case .ready:
                     safeResume { continuation.resume() }
+                case .waiting(let error):
+                    // NWConnection enters .waiting during TLS with self-signed
+                    // certs before the verify block runs. Do NOT fail here —
+                    // the verify block will accept the cert and move to .ready.
+                    // Store the error so we can report it if the timeout fires.
+                    lock.lock()
+                    lastWaitingError = error
+                    lock.unlock()
                 case .failed(let error):
                     safeResume { continuation.resume(throwing: PairingError.tlsFailed(error.localizedDescription)) }
                 case .cancelled:
@@ -191,15 +232,50 @@ final class ADBPairing: @unchecked Sendable {
             }
             connection.start(queue: queue)
 
-            queue.asyncAfter(deadline: .now() + 15) {
+            queue.asyncAfter(deadline: .now() + tlsTimeout) {
                 safeResume {
                     connection.cancel()
-                    continuation.resume(throwing: PairingError.timeout)
+                    lock.lock()
+                    let waitErr = lastWaitingError
+                    lock.unlock()
+                    if let waitErr = waitErr {
+                        continuation.resume(throwing: PairingError.connectionFailed(
+                            "Connection stuck (\(waitErr.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
+                        ))
+                    } else {
+                        continuation.resume(throwing: PairingError.timeout)
+                    }
                 }
             }
         }
 
-        return (connection, queue)
+        // Export TLS keying material after handshake completes.
+        // AOSP: pswd_.insert(pswd_.end(), exportedKeyMaterial.begin(), exportedKeyMaterial.end())
+        metadataLock.lock()
+        let metadata = capturedMetadata
+        metadataLock.unlock()
+
+        guard let metadata = metadata else {
+            connection.cancel()
+            throw PairingError.tlsFailed("TLS metadata not available for key export")
+        }
+
+        var ekm = [UInt8](repeating: 0, count: exportedKeySize)
+        let ekmSuccess = exportedKeyLabel.withCString { labelPtr in
+            sec_protocol_metadata_create_secret(
+                metadata,
+                exportedKeyLabelSize,
+                labelPtr,
+                exportedKeySize,
+                &ekm
+            )
+        }
+        guard ekmSuccess else {
+            connection.cancel()
+            throw PairingError.tlsFailed("Failed to export TLS keying material")
+        }
+
+        return (connection, queue, Data(ekm))
     }
 
     // MARK: - PeerInfo
@@ -259,7 +335,7 @@ final class ADBPairing: @unchecked Sendable {
 
     /// Receive a pairing protocol message.
     private static func receivePairingMessage(connection: NWConnection, queue: DispatchQueue) async throws -> (type: PairingMsgType, data: Data) {
-        let header = try await receiveExact(connection: connection, count: pairingPacketHeaderSize)
+        let header = try await receiveExact(connection: connection, queue: queue, count: pairingPacketHeaderSize)
 
         guard header[0] == pairingPacketVersion else {
             throw PairingError.protocolError("Unsupported pairing version: \(header[0])")
@@ -282,25 +358,40 @@ final class ADBPairing: @unchecked Sendable {
             throw PairingError.protocolError("Payload too large: \(payloadLength)")
         }
 
-        let payload = try await receiveExact(connection: connection, count: Int(payloadLength))
+        let payload = try await receiveExact(connection: connection, queue: queue, count: Int(payloadLength))
         return (msgType, payload)
     }
 
-    private static func receiveExact(connection: NWConnection, count: Int) async throws -> Data {
+    private static func receiveExact(connection: NWConnection, queue: DispatchQueue, count: Int) async throws -> Data {
         var buffer = Data()
         while buffer.count < count {
             let remaining = count - buffer.count
             let chunk: Data = try await withCheckedThrowingContinuation { continuation in
+                var resumed = false
+                let lock = NSLock()
+
+                func safeResume(_ block: () -> Void) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
+                    block()
+                }
+
                 connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
                     if let error = error {
-                        continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription)) }
                     } else if let data = data, !data.isEmpty {
-                        continuation.resume(returning: data)
+                        safeResume { continuation.resume(returning: data) }
                     } else if isComplete {
-                        continuation.resume(throwing: PairingError.connectionFailed("Connection closed"))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("Connection closed by device")) }
                     } else {
-                        continuation.resume(throwing: PairingError.connectionFailed("No data received"))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("No data received")) }
                     }
+                }
+
+                queue.asyncAfter(deadline: .now() + receiveTimeout) {
+                    safeResume { continuation.resume(throwing: PairingError.timeout) }
                 }
             }
             buffer.append(chunk)

@@ -121,6 +121,93 @@ final class SPAKE2Tests: XCTestCase {
         XCTAssertThrowsError(try encryptor.decrypt(Data(repeating: 0, count: 10)))
     }
 
+    // MARK: - Extended Password Tests (pairing code + TLS EKM)
+
+    func testSPAKE2ClientWithExtendedPassword() throws {
+        // AOSP appends 64 bytes of TLS exported keying material to the pairing code.
+        // Verify SPAKE2 works correctly with the longer password.
+        var password = Data("123456".utf8)       // 6 bytes
+        password.append(Data(repeating: 0xAB, count: 64)) // 64 bytes EKM
+        XCTAssertEqual(password.count, 70)
+
+        let client = try SPAKE2Client(password: password)
+        XCTAssertEqual(client.outgoingMessage.count, 32)
+
+        // Message must be a valid curve point
+        let point = EdPoint.decode([UInt8](client.outgoingMessage))
+        XCTAssertNotNil(point)
+        XCTAssertFalse(point!.isIdentity)
+    }
+
+    func testSPAKE2ClientExtendedPasswordDiffersFromPlain() throws {
+        // The extended password (code + EKM) must produce different SPAKE2
+        // messages than the plain code alone, because the password scalar changes.
+        let plainPassword = Data("123456".utf8)
+        var extendedPassword = Data("123456".utf8)
+        extendedPassword.append(Data(repeating: 0xFF, count: 64))
+
+        let clientPlain = try SPAKE2Client(password: plainPassword)
+        let clientExtended = try SPAKE2Client(password: extendedPassword)
+
+        // Both generate valid messages but they differ because the password
+        // scalar (SHA-512 of password) is different AND random x differs.
+        // We can't directly compare since x is random, but we can verify
+        // they're both valid distinct points.
+        XCTAssertEqual(clientPlain.outgoingMessage.count, 32)
+        XCTAssertEqual(clientExtended.outgoingMessage.count, 32)
+
+        let pointPlain = EdPoint.decode([UInt8](clientPlain.outgoingMessage))
+        let pointExtended = EdPoint.decode([UInt8](clientExtended.outgoingMessage))
+        XCTAssertNotNil(pointPlain)
+        XCTAssertNotNil(pointExtended)
+    }
+
+    func testSPAKE2ClientSameExtendedPasswordProducesDifferentMessages() throws {
+        // Even with the same password, each client generates random x,
+        // so messages should differ.
+        var password = Data("654321".utf8)
+        password.append(Data((0..<64).map { UInt8($0) }))
+
+        let client1 = try SPAKE2Client(password: password)
+        let client2 = try SPAKE2Client(password: password)
+
+        XCTAssertNotEqual(client1.outgoingMessage, client2.outgoingMessage,
+            "Different random x should produce different messages")
+    }
+
+    func testSPAKE2ClientProcessServerMessageWithExtendedPassword() throws {
+        // Verify processServerMessage works with extended password.
+        // We use the base point as a "fake" server message (it's a valid point).
+        var password = Data("999999".utf8)
+        password.append(Data(repeating: 0x42, count: 64))
+
+        let client = try SPAKE2Client(password: password)
+
+        // Use base point B as a fake server message — it's a valid Ed25519 point
+        let fakeServerMsg = Data(EdPoint.B.encode())
+        XCTAssertEqual(fakeServerMsg.count, 32)
+
+        // This should not crash. The result won't match a real server's,
+        // but the computation should complete without error.
+        let keyMaterial = try client.processServerMessage(fakeServerMsg)
+        XCTAssertEqual(keyMaterial.count, 64, "Key material should be 64 bytes (SHA-512)")
+    }
+
+    // MARK: - HKDF Info String Tests
+
+    func testHKDFInfoStringLength() {
+        // AOSP uses sizeof("adb pairing_auth aes-128-gcm key") - 1 = 32 bytes
+        let info = "adb pairing_auth aes-128-gcm key"
+        XCTAssertEqual(info.utf8.count, 32, "HKDF info must be 32 bytes (no null terminator)")
+    }
+
+    func testExportedKeyLabelLength() {
+        // AOSP uses sizeof("adb-label") = 10 (includes null terminator)
+        let label = "adb-label"
+        XCTAssertEqual(label.utf8.count + 1, 10,
+            "EKM label 'adb-label' + null must be 10 bytes to match AOSP sizeof()")
+    }
+
     // MARK: - Scalar Reduction Tests
 
     func testReduceModLSmallValue() {

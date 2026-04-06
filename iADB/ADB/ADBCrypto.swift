@@ -337,4 +337,135 @@ final class ADBCrypto {
     private func appendUInt32LE(_ data: inout Data, _ value: UInt32) {
         data.append(contentsOf: withUnsafeBytes(of: value.littleEndian) { Array($0) })
     }
+
+    // MARK: - TLS Identity for Pairing (mTLS)
+
+    private static let certLabel = "com.iadb.adbkey-cert"
+
+    /// Create a SecIdentity for TLS mutual authentication.
+    /// AOSP pairing server requires client certificate (SSL_VERIFY_FAIL_IF_NO_PEER_CERT).
+    /// Generates a self-signed X.509 cert from our RSA key and stores it in the Keychain.
+    func tlsIdentity() throws -> SecIdentity {
+        // Remove stale cert so it always matches current key
+        Self.deleteCertificate()
+
+        let certDER = try generateSelfSignedCert()
+        guard let certificate = SecCertificateCreateWithData(nil, certDER as CFData) else {
+            throw ADBError.cryptoError("Failed to parse generated certificate")
+        }
+
+        let addQuery: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecValueRef as String: certificate,
+            kSecAttrLabel as String: Self.certLabel
+        ]
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            throw ADBError.cryptoError("Failed to add certificate to Keychain: \(status)")
+        }
+
+        // Keychain automatically matches cert with private key via public key hash
+        let identityQuery: [String: Any] = [
+            kSecClass as String: kSecClassIdentity,
+            kSecAttrApplicationTag as String: Self.keyTag.data(using: .utf8)!,
+            kSecReturnRef as String: true
+        ]
+        var item: CFTypeRef?
+        let idStatus = SecItemCopyMatching(identityQuery as CFDictionary, &item)
+        guard idStatus == errSecSuccess else {
+            throw ADBError.cryptoError("Failed to create TLS identity: \(idStatus)")
+        }
+        return (item as! SecIdentity)
+    }
+
+    static func deleteCertificate() {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassCertificate,
+            kSecAttrLabel as String: certLabel
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    /// Build a minimal self-signed X.509 v1 certificate in DER format.
+    func generateSelfSignedCert() throws -> Data {
+        var error: Unmanaged<CFError>?
+        guard let pkcs1DER = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+            throw ADBError.cryptoError("Failed to export public key")
+        }
+
+        // OIDs
+        let oidSHA256RSA: [UInt8] = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]
+        let oidRSA: [UInt8]       = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]
+        let oidCN: [UInt8]        = [0x06, 0x03, 0x55, 0x04, 0x03]
+        let derNull: [UInt8]      = [0x05, 0x00]
+
+        let sigAlgo = derTag(0x30, Data(oidSHA256RSA + derNull))
+
+        // Issuer = Subject: CN=adb
+        let cnAttr = derTag(0x30, Data(oidCN) + derTag(0x0C, Data("adb".utf8)))
+        let name = derTag(0x30, derTag(0x31, cnAttr))
+
+        // Validity: now → now + 10 years
+        let now = Date()
+        let future = Calendar.current.date(byAdding: .year, value: 10, to: now)!
+        let validity = derTag(0x30, derUTCTime(now) + derUTCTime(future))
+
+        // SubjectPublicKeyInfo: algorithm + BIT STRING wrapping PKCS#1
+        let spkiAlgo = derTag(0x30, Data(oidRSA + derNull))
+        let spki = derTag(0x30, spkiAlgo + derBitString(pkcs1DER))
+
+        // Serial number
+        let serial = derTag(0x02, Data([0x01]))
+
+        // TBSCertificate (v1 — no explicit version tag needed)
+        let tbs = derTag(0x30, serial + sigAlgo + name + validity + name + spki)
+
+        // Sign TBSCertificate
+        error = nil
+        guard let signature = SecKeyCreateSignature(
+            privateKey,
+            .rsaSignatureMessagePKCS1v15SHA256,
+            tbs as CFData,
+            &error
+        ) as Data? else {
+            throw ADBError.cryptoError("Failed to sign certificate: \(error?.takeRetainedValue().localizedDescription ?? "unknown")")
+        }
+
+        // Full Certificate
+        return derTag(0x30, tbs + sigAlgo + derBitString(signature))
+    }
+
+    // MARK: - DER Encoding Helpers
+
+    func derTag(_ tag: UInt8, _ content: Data) -> Data {
+        var result = Data([tag])
+        result.append(contentsOf: derLength(content.count))
+        result.append(content)
+        return result
+    }
+
+    func derLength(_ length: Int) -> [UInt8] {
+        if length < 0x80 {
+            return [UInt8(length)]
+        } else if length <= 0xFF {
+            return [0x81, UInt8(length)]
+        } else {
+            return [0x82, UInt8(length >> 8), UInt8(length & 0xFF)]
+        }
+    }
+
+    func derBitString(_ content: Data) -> Data {
+        // BIT STRING: tag + length + 0x00 (no unused bits) + content
+        var inner = Data([0x00])
+        inner.append(content)
+        return derTag(0x03, inner)
+    }
+
+    func derUTCTime(_ date: Date) -> Data {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyMMddHHmmss"
+        fmt.timeZone = TimeZone(identifier: "UTC")
+        let str = fmt.string(from: date) + "Z"
+        return derTag(0x17, Data(str.utf8))
+    }
 }

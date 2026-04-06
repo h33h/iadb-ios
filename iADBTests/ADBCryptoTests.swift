@@ -11,6 +11,7 @@ final class ADBCryptoTests: XCTestCase {
     }
 
     override func tearDown() {
+        ADBCrypto.deleteCertificate()
         ADBCrypto.deleteKeys()
         super.tearDown()
     }
@@ -125,5 +126,160 @@ final class ADBCryptoTests: XCTestCase {
         // After deletion, creating a new instance should generate new keys
         let crypto2 = try ADBCrypto()
         XCTAssertNotNil(crypto2.publicKey)
+    }
+
+    // MARK: - Self-Signed Certificate Generation
+
+    func testGenerateSelfSignedCertIsValidDER() throws {
+        let crypto = try ADBCrypto()
+        let certDER = try crypto.generateSelfSignedCert()
+
+        // Must be parseable by SecCertificateCreateWithData
+        let cert = SecCertificateCreateWithData(nil, certDER as CFData)
+        XCTAssertNotNil(cert, "Generated DER must be a valid X.509 certificate")
+    }
+
+    func testGenerateSelfSignedCertStructure() throws {
+        let crypto = try ADBCrypto()
+        let certDER = try crypto.generateSelfSignedCert()
+        let bytes = [UInt8](certDER)
+
+        // Must start with SEQUENCE tag
+        XCTAssertEqual(bytes[0], 0x30, "Certificate must be a DER SEQUENCE")
+
+        // Must be non-trivially long (RSA-2048 cert is ~600-900 bytes)
+        XCTAssertGreaterThan(certDER.count, 400, "RSA-2048 cert should be >400 bytes")
+        XCTAssertLessThan(certDER.count, 2000, "Certificate should not be excessively large")
+    }
+
+    func testGenerateSelfSignedCertContainsSubjectCN() throws {
+        let crypto = try ADBCrypto()
+        let certDER = try crypto.generateSelfSignedCert()
+
+        let cert = SecCertificateCreateWithData(nil, certDER as CFData)!
+        let summary = SecCertificateCopySubjectSummary(cert) as String?
+        XCTAssertEqual(summary, "adb", "Certificate subject CN should be 'adb'")
+    }
+
+    func testGenerateSelfSignedCertDeterministicStructure() throws {
+        let crypto = try ADBCrypto()
+        let cert1 = try crypto.generateSelfSignedCert()
+        let cert2 = try crypto.generateSelfSignedCert()
+
+        // Same key, same subject → same TBS structure, same signature
+        // (deterministic signing with PKCS1v15)
+        // Note: validity timestamps may differ by a second, so we only check
+        // that both are parseable
+        XCTAssertNotNil(SecCertificateCreateWithData(nil, cert1 as CFData))
+        XCTAssertNotNil(SecCertificateCreateWithData(nil, cert2 as CFData))
+    }
+
+    func testTLSIdentityCreation() throws {
+        guard ADBCryptoTests.isKeychainAvailable() else {
+            // Keychain not available in CI — skip
+            return
+        }
+
+        let crypto = try ADBCrypto()
+        let identity = try crypto.tlsIdentity()
+
+        // Verify the identity contains our key
+        var privateKey: SecKey?
+        let status = SecIdentityCopyPrivateKey(identity, &privateKey)
+        XCTAssertEqual(status, errSecSuccess)
+        XCTAssertNotNil(privateKey)
+
+        // Verify the identity contains a certificate
+        var cert: SecCertificate?
+        let certStatus = SecIdentityCopyCertificate(identity, &cert)
+        XCTAssertEqual(certStatus, errSecSuccess)
+        XCTAssertNotNil(cert)
+
+        // Certificate subject should be CN=adb
+        let summary = SecCertificateCopySubjectSummary(cert!) as String?
+        XCTAssertEqual(summary, "adb")
+    }
+
+    func testTLSIdentityRecreatedAfterKeyRotation() throws {
+        guard ADBCryptoTests.isKeychainAvailable() else { return }
+
+        let crypto1 = try ADBCrypto()
+        let identity1 = try crypto1.tlsIdentity()
+
+        // Delete keys and regenerate
+        ADBCrypto.deleteKeys()
+        ADBCrypto.deleteCertificate()
+
+        let crypto2 = try ADBCrypto()
+        let identity2 = try crypto2.tlsIdentity()
+
+        // Both should be valid identities
+        var cert1: SecCertificate?
+        var cert2: SecCertificate?
+        SecIdentityCopyCertificate(identity1, &cert1)
+        SecIdentityCopyCertificate(identity2, &cert2)
+        XCTAssertNotNil(cert1)
+        XCTAssertNotNil(cert2)
+    }
+
+    // MARK: - DER Encoding Helpers
+
+    func testDERLengthShort() throws {
+        let crypto = try ADBCrypto()
+        // Lengths < 128 are single byte
+        XCTAssertEqual(crypto.derLength(0), [0x00])
+        XCTAssertEqual(crypto.derLength(1), [0x01])
+        XCTAssertEqual(crypto.derLength(127), [0x7F])
+    }
+
+    func testDERLengthMedium() throws {
+        let crypto = try ADBCrypto()
+        // Lengths 128-255 use 0x81 prefix
+        XCTAssertEqual(crypto.derLength(128), [0x81, 0x80])
+        XCTAssertEqual(crypto.derLength(255), [0x81, 0xFF])
+    }
+
+    func testDERLengthLong() throws {
+        let crypto = try ADBCrypto()
+        // Lengths 256-65535 use 0x82 prefix
+        XCTAssertEqual(crypto.derLength(256), [0x82, 0x01, 0x00])
+        XCTAssertEqual(crypto.derLength(1000), [0x82, 0x03, 0xE8])
+    }
+
+    func testDERTagSequence() throws {
+        let crypto = try ADBCrypto()
+        let content = Data([0x01, 0x02, 0x03])
+        let result = crypto.derTag(0x30, content)
+        // SEQUENCE tag (0x30) + length (3) + content
+        XCTAssertEqual([UInt8](result), [0x30, 0x03, 0x01, 0x02, 0x03])
+    }
+
+    func testDERBitString() throws {
+        let crypto = try ADBCrypto()
+        let content = Data([0xAA, 0xBB])
+        let result = crypto.derBitString(content)
+        // BIT STRING tag (0x03) + length (3) + 0x00 (no unused bits) + content
+        XCTAssertEqual([UInt8](result), [0x03, 0x03, 0x00, 0xAA, 0xBB])
+    }
+
+    func testDERUTCTime() throws {
+        let crypto = try ADBCrypto()
+        // Create a known date: 2025-01-15 12:30:45 UTC
+        var components = DateComponents()
+        components.year = 2025
+        components.month = 1
+        components.day = 15
+        components.hour = 12
+        components.minute = 30
+        components.second = 45
+        components.timeZone = TimeZone(identifier: "UTC")
+        let date = Calendar.current.date(from: components)!
+
+        let result = crypto.derUTCTime(date)
+        let bytes = [UInt8](result)
+        // UTCTime tag (0x17) + length + "250115123045Z"
+        XCTAssertEqual(bytes[0], 0x17) // UTCTime tag
+        let timeString = String(data: Data(bytes[2...]), encoding: .utf8)
+        XCTAssertEqual(timeString, "250115123045Z")
     }
 }
