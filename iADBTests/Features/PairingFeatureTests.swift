@@ -103,6 +103,80 @@ struct PairingFeatureTests {
     }
 
     @Test
+    func pairWithCodeTimeout() async {
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "37000",
+                pairingCode: "123456"
+            )
+        ) {
+            PairingFeature()
+        } withDependencies: {
+            $0.adbPairing.pair = { _, _, _ in
+                throw ADBPairing.PairingError.timeout
+            }
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .pairing
+        }
+        await store.receive(\.pairingResult.failure) {
+            $0.pairingState = .error("Pairing timed out")
+        }
+    }
+
+    @Test
+    func pairWithCodeTLSFailed() async {
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "37000",
+                pairingCode: "123456"
+            )
+        ) {
+            PairingFeature()
+        } withDependencies: {
+            $0.adbPairing.pair = { _, _, _ in
+                throw ADBPairing.PairingError.tlsFailed("unknown certificate")
+            }
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .pairing
+        }
+        await store.receive(\.pairingResult.failure) {
+            $0.pairingState = .error("TLS handshake failed: unknown certificate")
+        }
+    }
+
+    @Test
+    func pairWithCodeConnectionFailed() async {
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "37000",
+                pairingCode: "123456"
+            )
+        ) {
+            PairingFeature()
+        } withDependencies: {
+            $0.adbPairing.pair = { _, _, _ in
+                throw ADBPairing.PairingError.connectionFailed(
+                    "Connection stuck (Network.NWError). Check that Local Network permission is granted and both devices are on the same WiFi."
+                )
+            }
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .pairing
+        }
+        await store.receive(\.pairingResult.failure) {
+            $0.pairingState = .error("Pairing connection failed: Connection stuck (Network.NWError). Check that Local Network permission is granted and both devices are on the same WiFi.")
+        }
+    }
+
+    @Test
     func reset() async {
         let store = TestStore(
             initialState: PairingFeature.State(

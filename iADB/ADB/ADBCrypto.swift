@@ -387,7 +387,7 @@ final class ADBCrypto {
     }
 
     /// Build a minimal self-signed X.509 v1 certificate in DER format.
-    private func generateSelfSignedCert() throws -> Data {
+    func generateSelfSignedCert() throws -> Data {
         var error: Unmanaged<CFError>?
         guard let pkcs1DER = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
             throw ADBError.cryptoError("Failed to export public key")
@@ -437,14 +437,14 @@ final class ADBCrypto {
 
     // MARK: - DER Encoding Helpers
 
-    private func derTag(_ tag: UInt8, _ content: Data) -> Data {
+    func derTag(_ tag: UInt8, _ content: Data) -> Data {
         var result = Data([tag])
         result.append(contentsOf: derLength(content.count))
         result.append(content)
         return result
     }
 
-    private func derLength(_ length: Int) -> [UInt8] {
+    func derLength(_ length: Int) -> [UInt8] {
         if length < 0x80 {
             return [UInt8(length)]
         } else if length <= 0xFF {
@@ -454,14 +454,14 @@ final class ADBCrypto {
         }
     }
 
-    private func derBitString(_ content: Data) -> Data {
+    func derBitString(_ content: Data) -> Data {
         // BIT STRING: tag + length + 0x00 (no unused bits) + content
         var inner = Data([0x00])
         inner.append(content)
         return derTag(0x03, inner)
     }
 
-    private func derUTCTime(_ date: Date) -> Data {
+    func derUTCTime(_ date: Date) -> Data {
         let fmt = DateFormatter()
         fmt.dateFormat = "yyMMddHHmmss"
         fmt.timeZone = TimeZone(identifier: "UTC")

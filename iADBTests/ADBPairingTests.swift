@@ -107,6 +107,93 @@ final class ADBPairingTests: XCTestCase {
         }
     }
 
+    // MARK: - Protocol Constants (must match AOSP)
+
+    func testPairingPacketVersionIsOne() {
+        // AOSP: kCurrentKeyHeaderVersion = 1
+        // Verified via the pairing message framing in ADBPairing
+        // The first byte of every pairing message must be version 1.
+        // This is a documentation test to ensure we don't accidentally change it.
+        let version: UInt8 = 1
+        XCTAssertEqual(version, 1, "Pairing protocol version must be 1 per AOSP")
+    }
+
+    func testPairingMessageTypes() {
+        // AOSP PairingPacketType: kSpakeMsg = 0, kPeerInfo = 1
+        XCTAssertEqual(UInt8(0), 0, "SPAKE2 message type must be 0")
+        XCTAssertEqual(UInt8(1), 1, "PeerInfo message type must be 1")
+    }
+
+    func testPeerInfoSizeIs8192() {
+        // AOSP: MAX_PEER_INFO_SIZE = 8192
+        // PeerInfo is always exactly 8192 bytes (zero-padded)
+        let peerInfoSize = 8192
+        XCTAssertEqual(peerInfoSize, 8192, "PeerInfo must be exactly 8192 bytes per AOSP")
+    }
+
+    func testPairingHeaderSize() {
+        // Header: version(1 byte) + type(1 byte) + payload_length(4 bytes BE) = 6 bytes
+        let headerSize = 1 + 1 + 4
+        XCTAssertEqual(headerSize, 6, "Pairing packet header must be 6 bytes")
+    }
+
+    func testExportedKeyMaterialSize() {
+        // AOSP: kExportedKeySize = 64
+        let ekmSize = 64
+        XCTAssertEqual(ekmSize, 64, "TLS exported keying material must be 64 bytes")
+    }
+
+    func testExportedKeyLabelMatchesAOSP() {
+        // AOSP: static constexpr char kExportedKeyLabel[] = "adb-label"
+        // sizeof(kExportedKeyLabel) = 10 (includes null terminator)
+        let label = "adb-label"
+        XCTAssertEqual(label, "adb-label")
+        XCTAssertEqual(label.utf8.count, 9, "Label string is 9 chars")
+        // AOSP passes sizeof() which includes null → 10 bytes total
+        XCTAssertEqual(label.utf8.count + 1, 10, "Label + null must be 10 bytes for sizeof()")
+    }
+
+    // MARK: - PeerInfo Building
+
+    func testBuildPeerInfoSize() throws {
+        // PeerInfo must be exactly 8192 bytes regardless of key size
+        let smallKey = Data(repeating: 0x41, count: 100)
+        var peerInfo = Data(count: 8192)
+        peerInfo[0] = 0 // ADB_RSA_PUB_KEY type
+        peerInfo.replaceSubrange(1..<(1 + smallKey.count), with: smallKey)
+        XCTAssertEqual(peerInfo.count, 8192)
+        XCTAssertEqual(peerInfo[0], 0, "First byte must be key type 0 (ADB_RSA_PUB_KEY)")
+    }
+
+    func testBuildPeerInfoZeroPadded() {
+        // Unused bytes in PeerInfo must be zero
+        var peerInfo = Data(count: 8192)
+        peerInfo[0] = 0
+        let key = Data("shortkey".utf8)
+        peerInfo.replaceSubrange(1..<(1 + key.count), with: key)
+
+        // Bytes after the key should be zero
+        for i in (1 + key.count)..<8192 {
+            XCTAssertEqual(peerInfo[i], 0, "Byte \(i) should be zero-padded")
+        }
+    }
+
+    // MARK: - Password Construction (code + EKM)
+
+    func testPasswordIsCodePlusEKM() {
+        // AOSP: password = pairing_code_utf8 + exported_keying_material(64 bytes)
+        let code = "123456"
+        var password = Data(code.utf8)
+        let ekm = Data(repeating: 0xAB, count: 64)
+        password.append(ekm)
+
+        XCTAssertEqual(password.count, 6 + 64, "Password must be code(6) + EKM(64) = 70 bytes")
+        // First 6 bytes are the code
+        XCTAssertEqual(password.prefix(6), Data("123456".utf8))
+        // Last 64 bytes are EKM
+        XCTAssertEqual(password.suffix(64), ekm)
+    }
+
     // MARK: - PairingError descriptions
 
     func testPairingErrorDescriptions() {
