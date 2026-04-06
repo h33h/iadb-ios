@@ -62,8 +62,11 @@ final class ADBPairing: @unchecked Sendable {
         let crypto = try ADBCrypto()
         let publicKeyData = try crypto.adbPublicKey()
 
-        // Step 1: TLS connection
-        let (connection, queue) = try await connectTLS(host: host, port: port)
+        // AOSP pairing requires mutual TLS — generate client identity
+        let identity = try crypto.tlsIdentity()
+
+        // Step 1: TLS connection (with client certificate for mTLS)
+        let (connection, queue) = try await connectTLS(host: host, port: port, identity: identity)
         defer { connection.cancel() }
 
         // Step 2: SPAKE2 key exchange
@@ -143,7 +146,7 @@ final class ADBPairing: @unchecked Sendable {
     private static let tlsTimeout: TimeInterval = 30
     private static let receiveTimeout: TimeInterval = 15
 
-    private static func connectTLS(host: String, port: UInt16) async throws -> (NWConnection, DispatchQueue) {
+    private static func connectTLS(host: String, port: UInt16, identity: SecIdentity) async throws -> (NWConnection, DispatchQueue) {
         let queue = DispatchQueue(label: "com.iadb.pairing")
 
         let tlsOptions = NWProtocolTLS.Options()
@@ -161,6 +164,16 @@ final class ADBPairing: @unchecked Sendable {
         sec_protocol_options_set_min_tls_protocol_version(
             tlsOptions.securityProtocolOptions,
             .TLSv13
+        )
+
+        // Provide client certificate for mutual TLS.
+        // AOSP sets SSL_VERIFY_FAIL_IF_NO_PEER_CERT — server rejects clients without a cert.
+        guard let secIdentity = sec_identity_create(identity) else {
+            throw PairingError.tlsFailed("Failed to create sec_identity_t from SecIdentity")
+        }
+        sec_protocol_options_set_local_identity(
+            tlsOptions.securityProtocolOptions,
+            secIdentity
         )
 
         let parameters = NWParameters(tls: tlsOptions)
