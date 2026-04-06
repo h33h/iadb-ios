@@ -140,6 +140,9 @@ final class ADBPairing: @unchecked Sendable {
 
     // MARK: - TLS Connection
 
+    private static let tlsTimeout: TimeInterval = 30
+    private static let receiveTimeout: TimeInterval = 15
+
     private static func connectTLS(host: String, port: UInt16) async throws -> (NWConnection, DispatchQueue) {
         let queue = DispatchQueue(label: "com.iadb.pairing")
 
@@ -181,6 +184,16 @@ final class ADBPairing: @unchecked Sendable {
                 switch state {
                 case .ready:
                     safeResume { continuation.resume() }
+                case .waiting(let error):
+                    // Connection cannot proceed — typically Local Network
+                    // permission denied or network unreachable.
+                    // Fail fast instead of waiting for the timeout.
+                    safeResume {
+                        connection.cancel()
+                        continuation.resume(throwing: PairingError.connectionFailed(
+                            "Network unavailable (\(error.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
+                        ))
+                    }
                 case .failed(let error):
                     safeResume { continuation.resume(throwing: PairingError.tlsFailed(error.localizedDescription)) }
                 case .cancelled:
@@ -191,7 +204,7 @@ final class ADBPairing: @unchecked Sendable {
             }
             connection.start(queue: queue)
 
-            queue.asyncAfter(deadline: .now() + 15) {
+            queue.asyncAfter(deadline: .now() + tlsTimeout) {
                 safeResume {
                     connection.cancel()
                     continuation.resume(throwing: PairingError.timeout)
@@ -259,7 +272,7 @@ final class ADBPairing: @unchecked Sendable {
 
     /// Receive a pairing protocol message.
     private static func receivePairingMessage(connection: NWConnection, queue: DispatchQueue) async throws -> (type: PairingMsgType, data: Data) {
-        let header = try await receiveExact(connection: connection, count: pairingPacketHeaderSize)
+        let header = try await receiveExact(connection: connection, queue: queue, count: pairingPacketHeaderSize)
 
         guard header[0] == pairingPacketVersion else {
             throw PairingError.protocolError("Unsupported pairing version: \(header[0])")
@@ -282,25 +295,40 @@ final class ADBPairing: @unchecked Sendable {
             throw PairingError.protocolError("Payload too large: \(payloadLength)")
         }
 
-        let payload = try await receiveExact(connection: connection, count: Int(payloadLength))
+        let payload = try await receiveExact(connection: connection, queue: queue, count: Int(payloadLength))
         return (msgType, payload)
     }
 
-    private static func receiveExact(connection: NWConnection, count: Int) async throws -> Data {
+    private static func receiveExact(connection: NWConnection, queue: DispatchQueue, count: Int) async throws -> Data {
         var buffer = Data()
         while buffer.count < count {
             let remaining = count - buffer.count
             let chunk: Data = try await withCheckedThrowingContinuation { continuation in
+                var resumed = false
+                let lock = NSLock()
+
+                func safeResume(_ block: () -> Void) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !resumed else { return }
+                    resumed = true
+                    block()
+                }
+
                 connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
                     if let error = error {
-                        continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription)) }
                     } else if let data = data, !data.isEmpty {
-                        continuation.resume(returning: data)
+                        safeResume { continuation.resume(returning: data) }
                     } else if isComplete {
-                        continuation.resume(throwing: PairingError.connectionFailed("Connection closed"))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("Connection closed by device")) }
                     } else {
-                        continuation.resume(throwing: PairingError.connectionFailed("No data received"))
+                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("No data received")) }
                     }
+                }
+
+                queue.asyncAfter(deadline: .now() + receiveTimeout) {
+                    safeResume { continuation.resume(throwing: PairingError.timeout) }
                 }
             }
             buffer.append(chunk)
