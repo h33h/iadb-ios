@@ -66,11 +66,14 @@ final class ADBPairing: @unchecked Sendable {
         let identity = try crypto.tlsIdentity()
 
         // Step 1: TLS connection (with client certificate for mTLS)
-        let (connection, queue) = try await connectTLS(host: host, port: port, identity: identity)
+        let (connection, queue, exportedKey) = try await connectTLS(host: host, port: port, identity: identity)
         defer { connection.cancel() }
 
         // Step 2: SPAKE2 key exchange
-        let passwordData = Data(trimmedCode.utf8)
+        // AOSP appends TLS exported keying material to the pairing code:
+        //   pswd = pairing_code_bytes + tls_exported_key_material(64 bytes)
+        var passwordData = Data(trimmedCode.utf8)
+        passwordData.append(exportedKey)
         let spake2: SPAKE2Client
         do {
             spake2 = try SPAKE2Client(password: passwordData)
@@ -146,15 +149,28 @@ final class ADBPairing: @unchecked Sendable {
     private static let tlsTimeout: TimeInterval = 30
     private static let receiveTimeout: TimeInterval = 15
 
-    private static func connectTLS(host: String, port: UInt16, identity: SecIdentity) async throws -> (NWConnection, DispatchQueue) {
+    private static let exportedKeySize = 64
+    // AOSP uses sizeof("adb-label") = 10, which includes the null terminator
+    private static let exportedKeyLabel = "adb-label"
+    private static let exportedKeyLabelSize = 10 // strlen + 1 (null), matches AOSP sizeof()
+
+    private static func connectTLS(host: String, port: UInt16, identity: SecIdentity) async throws -> (NWConnection, DispatchQueue, Data) {
         let queue = DispatchQueue(label: "com.iadb.pairing")
 
         let tlsOptions = NWProtocolTLS.Options()
 
+        // Capture TLS metadata for exporting keying material after handshake.
+        // AOSP appends TLS EKM to the SPAKE2 password.
+        let metadataLock = NSLock()
+        var capturedMetadata: sec_protocol_metadata_t?
+
         // Accept self-signed certificates (ADB uses self-signed)
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
-            { _, _, completionHandler in
+            { metadata, _, completionHandler in
+                metadataLock.lock()
+                capturedMetadata = metadata
+                metadataLock.unlock()
                 completionHandler(true)
             },
             queue
@@ -233,7 +249,33 @@ final class ADBPairing: @unchecked Sendable {
             }
         }
 
-        return (connection, queue)
+        // Export TLS keying material after handshake completes.
+        // AOSP: pswd_.insert(pswd_.end(), exportedKeyMaterial.begin(), exportedKeyMaterial.end())
+        metadataLock.lock()
+        let metadata = capturedMetadata
+        metadataLock.unlock()
+
+        guard let metadata = metadata else {
+            connection.cancel()
+            throw PairingError.tlsFailed("TLS metadata not available for key export")
+        }
+
+        var ekm = [UInt8](repeating: 0, count: exportedKeySize)
+        let ekmSuccess = exportedKeyLabel.withCString { labelPtr in
+            sec_protocol_metadata_create_secret(
+                metadata,
+                exportedKeyLabelSize,
+                labelPtr,
+                exportedKeySize,
+                &ekm
+            )
+        }
+        guard ekmSuccess else {
+            connection.cancel()
+            throw PairingError.tlsFailed("Failed to export TLS keying material")
+        }
+
+        return (connection, queue, Data(ekm))
     }
 
     // MARK: - PeerInfo
