@@ -260,22 +260,21 @@ final class ADBPairing: @unchecked Sendable {
             throw PairingError.tlsFailed("TLS metadata not available for key export")
         }
 
-        var ekm = [UInt8](repeating: 0, count: exportedKeySize)
-        let ekmSuccess = exportedKeyLabel.withCString { labelPtr in
+        let ekmDispatchData: dispatch_data_t? = exportedKeyLabel.withCString { labelPtr in
             sec_protocol_metadata_create_secret(
                 metadata,
                 exportedKeyLabelSize,
                 labelPtr,
-                exportedKeySize,
-                &ekm
+                exportedKeySize
             )
         }
-        guard ekmSuccess else {
+        guard let ekmDispatchData = ekmDispatchData else {
             connection.cancel()
             throw PairingError.tlsFailed("Failed to export TLS keying material")
         }
 
-        return (connection, queue, Data(ekm))
+        let ekm = ekmDispatchData as AnyObject as! NSData as Data
+        return (connection, queue, ekm)
     }
 
     // MARK: - PeerInfo
