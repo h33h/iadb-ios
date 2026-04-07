@@ -86,8 +86,8 @@ struct ConnectionFeatureTests {
     }
 
     @Test
-    func showPairingForDevice() async {
-        let device = DiscoveredDevice(id: "test", name: "Galaxy", host: "10.0.0.5", port: 42100, isPaired: false)
+    func showPairingForDeviceWithPairingPort() async {
+        let device = DiscoveredDevice(id: "test", name: "Galaxy", host: "10.0.0.5", port: 42100, isPaired: false, pairingPort: 37000)
         let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         }
@@ -95,8 +95,22 @@ struct ConnectionFeatureTests {
         await store.send(.showPairingForDevice(device)) {
             $0.pairing = PairingFeature.State(
                 hostInput: "10.0.0.5",
-                portInput: "42100",
+                portInput: "37000",
                 isPrefilled: true
+            )
+        }
+    }
+
+    @Test
+    func showPairingForDeviceWithoutPairingPort() async {
+        let device = DiscoveredDevice(id: "test", name: "Galaxy", host: "10.0.0.5", port: 42100, isPaired: false)
+        let store = TestStore(initialState: ConnectionFeature.State()) {
+            ConnectionFeature()
+        }
+
+        await store.send(.showPairingForDevice(device)) {
+            $0.pairing = PairingFeature.State(
+                hostInput: "10.0.0.5"
             )
         }
     }
