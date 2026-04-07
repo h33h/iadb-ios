@@ -159,4 +159,6 @@ final class ADBSTLSFramer: NWProtocolFramerImplementation {
     func stop(framer: NWProtocolFramer.Instance) -> Bool {
         return true
     }
+
+    func cleanup(framer: NWProtocolFramer.Instance) {}
 }
