@@ -39,7 +39,11 @@ final class ADBMessageTests: XCTestCase {
     }
 
     func testVersion() {
-        XCTAssertEqual(ADBMessage.version, 0x01000000)
+        XCTAssertEqual(ADBMessage.version, 0x01000001)
+    }
+
+    func testStlsVersion() {
+        XCTAssertEqual(ADBMessage.stlsVersion, 0x01000000)
     }
 
     // MARK: - Checksum
@@ -305,8 +309,8 @@ final class ADBMessageTests: XCTestCase {
         var raw = Data()
         // command = CNXN = 0x4e584e43 LE
         raw.append(contentsOf: [0x43, 0x4e, 0x58, 0x4e])
-        // arg0 = version 0x01000000 LE
-        raw.append(contentsOf: [0x00, 0x00, 0x00, 0x01])
+        // arg0 = version 0x01000001 LE
+        raw.append(contentsOf: [0x01, 0x00, 0x00, 0x01])
         // arg1 = maxPayload 4096 = 0x00001000 LE
         raw.append(contentsOf: [0x00, 0x10, 0x00, 0x00])
         // dataLength = 0
@@ -320,7 +324,7 @@ final class ADBMessageTests: XCTestCase {
         let header = ADBMessage.parseHeader(from: raw)
         XCTAssertNotNil(header)
         XCTAssertEqual(header?.command, ADBCommand.connect.rawValue)
-        XCTAssertEqual(header?.arg0, 0x01000000)
+        XCTAssertEqual(header?.arg0, 0x01000001)
         XCTAssertEqual(header?.arg1, 4096)
     }
 

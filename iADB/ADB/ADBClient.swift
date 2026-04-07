@@ -17,32 +17,65 @@ final class ADBClient: @unchecked Sendable {
 
     // MARK: - Connection
 
-    /// Подключение с mTLS — для _adb-tls-connect порта (Android 11+ Wireless Debugging)
+    /// Connect to an Android device via the _adb-tls-connect port (Android 11+ Wireless Debugging).
+    ///
+    /// Implements the STLS protocol flow per AOSP:
+    /// 1. Plain TCP connect
+    /// 2. Client sends CNXN
+    /// 3. Server responds with A_STLS (requests TLS upgrade)
+    /// 4. Client sends A_STLS back
+    /// 5. TLS 1.3 handshake with mTLS (client cert from pairing)
+    /// 6. Server sends CNXN over TLS (connection established)
     func connect(host: String, port: UInt16 = 5555) async throws {
         let identity = try crypto.tlsIdentity()
-        try await transport.connectTLS(host: host, port: port, identity: identity)
-        try await performHandshake()
+
+        // Step 1: Plain TCP connection
+        try await transport.connect(host: host, port: port)
+
+        // Step 2: Send CNXN
+        let connectMsg = ADBMessage.connectMessage()
+        try await transport.sendMessage(connectMsg)
+
+        // Step 3: Wait for server response
+        let response = try await transport.receiveMessage(timeout: 30)
+
+        switch response.commandType {
+        case .stls:
+            // Step 4: Server requests TLS upgrade — send A_STLS back
+            let stlsMsg = ADBMessage.stlsMessage()
+            try await transport.sendMessage(stlsMsg)
+
+            // Step 5: Upgrade to TLS 1.3 with our client certificate.
+            // startSecureConnection() completes enqueued writes (A_STLS) first.
+            transport.upgradeTLS(identity: identity)
+
+            // Step 6: Wait for CNXN from server over TLS
+            let cnxnResponse = try await transport.receiveMessage(timeout: 30)
+            guard cnxnResponse.commandType == .connect else {
+                throw ADBError.protocolError(
+                    "Expected CNXN after TLS, got \(String(format: "0x%08X", cnxnResponse.command))"
+                )
+            }
+            handleConnectResponse(cnxnResponse)
+
+        case .connect:
+            // Device responded with CNXN directly (no TLS required)
+            handleConnectResponse(response)
+
+        case .auth:
+            // Legacy AUTH flow (non-TLS or not yet trusted)
+            try await handleAuth(response)
+
+        default:
+            throw ADBError.protocolError(
+                "Unexpected response: \(String(format: "0x%08X", response.command))"
+            )
+        }
     }
 
     func disconnect() {
         transport.disconnect()
         deviceBanner = ""
-    }
-
-    private func performHandshake() async throws {
-        let connectMsg = ADBMessage.connectMessage()
-        try await transport.sendMessage(connectMsg)
-
-        let response = try await transport.receiveMessage()
-
-        switch response.commandType {
-        case .connect:
-            handleConnectResponse(response)
-        case .auth:
-            try await handleAuth(response)
-        default:
-            throw ADBError.protocolError("Unexpected response: \(String(format: "0x%08X", response.command))")
-        }
     }
 
     private func handleAuth(_ authMessage: ADBMessage) async throws {
