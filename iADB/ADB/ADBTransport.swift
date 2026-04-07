@@ -14,7 +14,7 @@ final class ADBTransport: @unchecked Sendable {
     // MARK: - Connection
 
     /// mTLS-подключение для Android 11+ Wireless Debugging
-    func connectTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 10) async throws {
+    func connectTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 30) async throws {
         let tlsOptions = NWProtocolTLS.Options()
 
         sec_protocol_options_set_verify_block(
