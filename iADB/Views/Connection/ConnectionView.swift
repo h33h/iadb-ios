@@ -7,43 +7,6 @@ struct ConnectionView: View {
     var body: some View {
         NavigationStack {
             List {
-                // Quick Connect Section
-                Section {
-                    HStack(spacing: 12) {
-                        VStack(spacing: 8) {
-                            TextField("IP Address (e.g. 192.168.1.100)", text: $store.hostInput)
-                                .textFieldStyle(.roundedBorder)
-                                .keyboardType(.URL)
-                                .autocapitalization(.none)
-                                .disableAutocorrection(true)
-
-                            HStack {
-                                TextField("Port", text: $store.portInput)
-                                    .textFieldStyle(.roundedBorder)
-                                    .keyboardType(.numberPad)
-                                    .frame(width: 80)
-
-                                Spacer()
-
-                                Button {
-                                    store.send(.quickConnect)
-                                } label: {
-                                    HStack(spacing: 6) {
-                                        Image(systemName: "link")
-                                        Text("Connect")
-                                    }
-                                    .font(.subheadline.bold())
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(store.hostInput.isEmpty || store.connectionState == .connecting)
-                            }
-                        }
-                    }
-                } header: {
-                    Text("Quick Connect")
-                }
-
-                // Connection Status
                 if store.connectionState != .disconnected {
                     Section {
                         HStack {
@@ -59,61 +22,62 @@ struct ConnectionView: View {
                                 .font(.subheadline)
                             }
                         }
-                        if case .authenticating = store.connectionState {
-                            Text("Please check the Android device screen and allow USB debugging connection.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
                     } header: {
                         Text("Status")
                     }
                 }
 
-                // Saved Devices
                 Section {
-                    if store.savedDevices.isEmpty {
-                        Text("No saved devices")
-                            .foregroundColor(.secondary)
-                            .font(.subheadline)
-                    } else {
-                        ForEach(store.savedDevices) { device in
-                            SavedDeviceRow(device: device) {
-                                store.send(.connectToDevice(device))
+                    if store.discoveredDevices.isEmpty {
+                        VStack(spacing: 8) {
+                            if store.isScanning {
+                                ProgressView()
+                                Text("Looking for devices with Wireless Debugging enabled...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .multilineTextAlignment(.center)
+                            } else {
+                                Text("No devices found")
+                                    .foregroundColor(.secondary)
+                                    .font(.subheadline)
                             }
-                            .swipeActions(edge: .trailing) {
-                                Button(role: .destructive) {
-                                    store.send(.removeDevice(device))
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                    } else {
+                        ForEach(store.discoveredDevices) { device in
+                            DiscoveredDeviceRow(device: device) {
+                                if device.isPaired {
+                                    store.send(.connectToDevice(device))
+                                } else {
+                                    store.send(.showPairingForDevice(device))
                                 }
                             }
                         }
                     }
                 } header: {
                     HStack {
-                        Text("Saved Devices")
+                        Text("Devices on Network")
                         Spacer()
-                        Button {
-                            store.send(.toggleAddDevice)
-                        } label: {
-                            Image(systemName: "plus.circle.fill")
+                        if store.isScanning && !store.discoveredDevices.isEmpty {
+                            ProgressView()
+                                .scaleEffect(0.7)
                         }
                     }
                 }
 
-                // Pairing Section (Android 11+)
                 Section {
                     Button {
-                        store.send(.showPairing)
+                        store.send(.showManualPairing)
                     } label: {
                         HStack {
                             Image(systemName: "link.badge.plus")
                                 .foregroundColor(.accentColor)
                                 .frame(width: 30)
                             VStack(alignment: .leading) {
-                                Text("Pair with Pairing Code")
+                                Text("Pair New Device")
                                     .font(.body)
-                                Text("Enter 6-digit code from device")
+                                Text("Enter pairing code manually")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -125,21 +89,22 @@ struct ConnectionView: View {
                     }
                     .foregroundColor(.primary)
                 } header: {
-                    Text("Pair New Device (Android 11+)")
+                    Text("Pair")
                 }
 
-                // Help Section
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label("How to enable WiFi ADB", systemImage: "questionmark.circle")
+                        Label("How to connect", systemImage: "questionmark.circle")
                             .font(.subheadline.bold())
                         Text("1. Enable Developer Options on your Android device")
                             .font(.caption)
                         Text("2. Enable 'Wireless debugging' in Developer Options")
                             .font(.caption)
-                        Text("3. Tap 'Pair device with pairing code' and use Pair above")
+                        Text("3. Devices appear here automatically")
                             .font(.caption)
-                        Text("4. Then connect using the IP and port shown on the main Wireless debugging screen")
+                        Text("4. First time: tap device → enter pairing code")
+                            .font(.caption)
+                        Text("5. After pairing: tap device → connected!")
                             .font(.caption)
                     }
                     .padding(.vertical, 4)
@@ -149,9 +114,6 @@ struct ConnectionView: View {
             }
             .navigationTitle("iADB")
             .onAppear { store.send(.onAppear) }
-            .sheet(isPresented: $store.showingAddDevice) {
-                AddDeviceSheet(store: store)
-            }
             .sheet(item: $store.scope(state: \.pairing, action: \.pairing)) { pairingStore in
                 PairingView(store: pairingStore)
             }
@@ -177,71 +139,35 @@ struct ConnectionView: View {
     }
 }
 
-struct SavedDeviceRow: View {
-    let device: SavedDevice
-    let onConnect: () -> Void
-
-    private var isPaired: Bool { device.port == 0 }
+struct DiscoveredDeviceRow: View {
+    let device: DiscoveredDevice
+    let onTap: () -> Void
 
     var body: some View {
-        Button(action: onConnect) {
+        Button(action: onTap) {
             HStack {
-                Image(systemName: isPaired ? "wifi" : "desktopcomputer")
+                Image(systemName: "desktopcomputer")
                     .foregroundColor(.accentColor)
                     .frame(width: 30)
                 VStack(alignment: .leading) {
-                    Text(device.displayName)
+                    Text(device.name)
                         .font(.body)
-                    Text(isPaired ? device.host : device.address)
+                    Text("\(device.host):\(device.port)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
-                if isPaired {
-                    Text("Enter port")
+                if device.isPaired {
+                    Text("Paired")
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.green)
+                } else {
+                    Text("Tap to pair")
+                        .font(.caption2)
+                        .foregroundColor(.orange)
                 }
-                Image(systemName: "chevron.right")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
             }
         }
         .foregroundColor(.primary)
-    }
-}
-
-struct AddDeviceSheet: View {
-    @Bindable var store: StoreOf<ConnectionFeature>
-    @Environment(\.dismiss) var dismiss
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    TextField("Device Name (optional)", text: $store.deviceNameInput)
-                    TextField("IP Address", text: $store.hostInput)
-                        .keyboardType(.URL)
-                        .autocapitalization(.none)
-                        .disableAutocorrection(true)
-                    TextField("Port", text: $store.portInput)
-                        .keyboardType(.numberPad)
-                }
-            }
-            .navigationTitle("Add Device")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save") {
-                        store.send(.addDevice)
-                    }
-                    .disabled(store.hostInput.isEmpty)
-                }
-            }
-        }
-        .presentationDetents([.medium])
     }
 }
