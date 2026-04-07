@@ -22,6 +22,11 @@
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>iADB needs access to your local network to connect to Android devices via WiFi ADB.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_adb-tls-connect._tcp</string>
+		<string>_adb-tls-pairing._tcp</string>
+	</array>
 <key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
