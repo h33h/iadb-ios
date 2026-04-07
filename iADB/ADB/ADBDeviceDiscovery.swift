@@ -4,13 +4,16 @@ import Network
 final class ADBDeviceDiscovery: @unchecked Sendable {
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "com.iadb.discovery")
-    /// Таймаут на DNS-резолв каждого сервиса
-    private let resolveTimeout: TimeInterval = 3
+    private let resolveTimeout: TimeInterval = 5
 
     func start(pairedKeys: [Data]) -> AsyncStream<[DiscoveredDevice]> {
         AsyncStream { continuation in
-            let descriptor = NWBrowser.Descriptor.bonjour(type: "_adb-tls-connect._tcp", domain: nil)
-            let browser = NWBrowser(for: descriptor, using: .init())
+            let params = NWParameters()
+            params.allowLocalEndpointReuse = true
+            params.acceptLocalOnly = true
+
+            let descriptor = NWBrowser.Descriptor.bonjour(type: "_adb-tls-connect._tcp", domain: "local.")
+            let browser = NWBrowser(for: descriptor, using: params)
 
             browser.browseResultsChangedHandler = { [queue, resolveTimeout] results, _ in
                 let group = DispatchGroup()
@@ -38,29 +41,49 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
                         group.leave()
                     }
 
+                    // Резолв Bonjour endpoint → IP:port через TCP connection
                     let conn = NWConnection(to: result.endpoint, using: .tcp)
-                    conn.pathUpdateHandler = { path in
-                        // Получаем endpoint из path (доступен раньше чем .ready)
-                        if let endpoint = path.remoteEndpoint,
-                           case .hostPort(let host, let port) = endpoint {
-                            let hostStr: String
-                            switch host {
-                            case .ipv4(let addr): hostStr = "\(addr)"
-                            case .ipv6(let addr): hostStr = "\(addr)"
-                            default: hostStr = "\(host)"
-                            }
-                            let device = DiscoveredDevice(
-                                id: name,
-                                name: name.replacingOccurrences(of: "adb-", with: ""),
-                                host: hostStr,
-                                port: port.rawValue,
-                                isPaired: false
-                            )
-                            finishResolve(conn: conn, device: device)
-                        }
-                    }
                     conn.stateUpdateHandler = { state in
                         switch state {
+                        case .ready:
+                            if let endpoint = conn.currentPath?.remoteEndpoint,
+                               case .hostPort(let host, let port) = endpoint {
+                                let hostStr: String
+                                switch host {
+                                case .ipv4(let addr): hostStr = "\(addr)"
+                                case .ipv6(let addr): hostStr = "\(addr)"
+                                default: hostStr = "\(host)"
+                                }
+                                let device = DiscoveredDevice(
+                                    id: name,
+                                    name: name.replacingOccurrences(of: "adb-", with: ""),
+                                    host: hostStr,
+                                    port: port.rawValue,
+                                    isPaired: false
+                                )
+                                finishResolve(conn: conn, device: device)
+                            } else {
+                                finishResolve(conn: conn, device: nil)
+                            }
+                        case .waiting:
+                            // TLS-порт не даёт plain TCP .ready — берём endpoint из path
+                            if let endpoint = conn.currentPath?.remoteEndpoint,
+                               case .hostPort(let host, let port) = endpoint {
+                                let hostStr: String
+                                switch host {
+                                case .ipv4(let addr): hostStr = "\(addr)"
+                                case .ipv6(let addr): hostStr = "\(addr)"
+                                default: hostStr = "\(host)"
+                                }
+                                let device = DiscoveredDevice(
+                                    id: name,
+                                    name: name.replacingOccurrences(of: "adb-", with: ""),
+                                    host: hostStr,
+                                    port: port.rawValue,
+                                    isPaired: false
+                                )
+                                finishResolve(conn: conn, device: device)
+                            }
                         case .failed, .cancelled:
                             finishResolve(conn: conn, device: nil)
                         default:
@@ -80,8 +103,16 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
             }
 
             browser.stateUpdateHandler = { state in
-                if case .failed = state {
+                switch state {
+                case .ready:
+                    break
+                case .waiting:
+                    // Local Network permission ещё не дана или отклонена
+                    break
+                case .failed:
                     continuation.yield([])
+                default:
+                    break
                 }
             }
 
