@@ -18,7 +18,8 @@ final class ADBClient: @unchecked Sendable {
     // MARK: - Connection
 
     func connect(host: String, port: UInt16 = 5555) async throws {
-        try await transport.connect(host: host, port: port)
+        let identity = try crypto.tlsIdentity()
+        try await transport.connectTLS(host: host, port: port, identity: identity)
         try await performHandshake()
     }
 

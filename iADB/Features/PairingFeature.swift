@@ -7,8 +7,11 @@ struct PairingFeature {
     struct State: Equatable {
         var hostInput = ""
         var portInput = ""
+        var connectionPortInput = ""
         var pairingCode = ""
         var pairingState: PairingState = .idle
+        /// Данные для сохранения устройства после успешного pairing
+        var pairedDeviceName: String?
     }
 
     enum PairingState: Equatable {
@@ -59,14 +62,15 @@ struct PairingFeature {
 
                 return .run { send in
                     let peerInfo = try await adbPairing.pair(host, port, code)
-                    await send(.pairingResult(.success("Paired with \(peerInfo.name)")))
+                    await send(.pairingResult(.success(peerInfo.name)))
                 } catch: { error, send in
                     await send(.pairingResult(.failure(error)))
                 }
                 .cancellable(id: CancelID.pairing)
 
-            case .pairingResult(.success(let message)):
-                state.pairingState = .success(message)
+            case .pairingResult(.success(let deviceName)):
+                state.pairingState = .success("Paired with \(deviceName)")
+                state.pairedDeviceName = deviceName
                 return .none
 
             case .pairingResult(.failure(let error)):

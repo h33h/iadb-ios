@@ -26,6 +26,7 @@ struct PairingFeatureTests {
         }
         await store.receive(\.pairingResult.success) {
             $0.pairingState = .success("Paired with Pixel 7")
+            $0.pairedDeviceName = "Pixel 7"
         }
     }
 

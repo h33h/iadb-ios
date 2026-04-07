@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import Security
 
 /// Low-level TCP transport for ADB protocol communication
 final class ADBTransport: @unchecked Sendable {
@@ -12,6 +13,40 @@ final class ADBTransport: @unchecked Sendable {
 
     // MARK: - Connection
 
+    /// mTLS-подключение для Android 11+ Wireless Debugging
+    func connectTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 10) async throws {
+        let tlsOptions = NWProtocolTLS.Options()
+
+        sec_protocol_options_set_verify_block(
+            tlsOptions.securityProtocolOptions,
+            { _, _, completionHandler in completionHandler(true) },
+            queue
+        )
+
+        sec_protocol_options_set_min_tls_protocol_version(
+            tlsOptions.securityProtocolOptions,
+            .TLSv13
+        )
+
+        guard let secIdentity = sec_identity_create(identity) else {
+            throw ADBError.connectionFailed("Failed to create sec_identity_t")
+        }
+        sec_protocol_options_set_local_identity(
+            tlsOptions.securityProtocolOptions,
+            secIdentity
+        )
+
+        let parameters = NWParameters(tls: tlsOptions)
+        parameters.allowLocalEndpointReuse = true
+
+        let nwHost = NWEndpoint.Host(host)
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
+        self.connection = conn
+
+        try await startConnection(conn, timeout: timeout)
+    }
+
     func connect(host: String, port: UInt16, timeout: TimeInterval = 10) async throws {
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(rawValue: port)!
@@ -22,6 +57,10 @@ final class ADBTransport: @unchecked Sendable {
         let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
         self.connection = conn
 
+        try await startConnection(conn, timeout: timeout)
+    }
+
+    private func startConnection(_ conn: NWConnection, timeout: TimeInterval) async throws {
         return try await withCheckedThrowingContinuation { continuation in
             var resumed = false
             let lock = NSLock()
@@ -38,6 +77,9 @@ final class ADBTransport: @unchecked Sendable {
                 switch state {
                 case .ready:
                     safeResume { continuation.resume() }
+                case .waiting:
+                    // TLS с self-signed — verify_block примет и перейдёт в .ready
+                    break
                 case .failed(let error):
                     safeResume { continuation.resume(throwing: ADBError.connectionFailed(error.localizedDescription)) }
                 case .cancelled:

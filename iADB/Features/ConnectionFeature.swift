@@ -132,6 +132,22 @@ struct ConnectionFeature {
                 state.pairing = PairingFeature.State()
                 return .none
 
+            case .pairing(.presented(.pairingResult(.success))):
+                guard let pairing = state.pairing else { return .none }
+                let host = pairing.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                let portStr = pairing.connectionPortInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                let port = UInt16(portStr) ?? 5555
+                let name = pairing.pairedDeviceName ?? ""
+                guard !host.isEmpty,
+                      !state.savedDevices.contains(where: { $0.host == host && $0.port == port }) else {
+                    return .none
+                }
+                let device = SavedDevice(name: name, host: host, port: port)
+                state.savedDevices.append(device)
+                return .run { [devices = state.savedDevices] _ in
+                    savedDevicesClient.save(devices)
+                }
+
             case .pairing:
                 return .none
             }

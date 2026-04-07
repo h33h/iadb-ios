@@ -29,9 +29,18 @@ struct PairingView: View {
                     TextField("Pairing Port", text: $store.portInput)
                         .keyboardType(.numberPad)
                 } header: {
-                    Text("Device Address")
+                    Text("Pairing Address")
                 } footer: {
                     Text("Enter the IP address and port shown in the 'Pair device with pairing code' dialog.")
+                }
+
+                Section {
+                    TextField("Connection Port", text: $store.connectionPortInput)
+                        .keyboardType(.numberPad)
+                } header: {
+                    Text("Connection Port")
+                } footer: {
+                    Text("Port shown on the main 'Wireless debugging' screen (not the pairing port). The device will be saved for future connections.")
                 }
 
                 Section {
