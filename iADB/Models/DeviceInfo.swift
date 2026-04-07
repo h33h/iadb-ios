@@ -46,6 +46,24 @@ struct DeviceDetails: Equatable {
     }
 }
 
+struct PairedDevice: Identifiable, Codable, Equatable {
+    let id: UUID
+    var name: String
+    var publicKey: Data
+    var lastHost: String
+
+    init(name: String, publicKey: Data, lastHost: String) {
+        self.id = UUID()
+        self.name = name
+        self.publicKey = publicKey
+        self.lastHost = lastHost
+    }
+
+    var displayName: String {
+        name.isEmpty ? lastHost : name
+    }
+}
+
 /// Connection state
 enum ConnectionState: Equatable {
     case disconnected

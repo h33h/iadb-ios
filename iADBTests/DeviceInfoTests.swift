@@ -68,6 +68,34 @@ final class DeviceInfoTests: XCTestCase {
         XCTAssertEqual(decoded[1].port, 5556)
     }
 
+    // MARK: - PairedDevice
+
+    func testPairedDeviceInit() {
+        let key = Data([1, 2, 3])
+        let device = PairedDevice(name: "Pixel 7", publicKey: key, lastHost: "192.168.1.42")
+        XCTAssertEqual(device.name, "Pixel 7")
+        XCTAssertEqual(device.publicKey, key)
+        XCTAssertEqual(device.lastHost, "192.168.1.42")
+        XCTAssertNotNil(device.id)
+    }
+
+    func testPairedDeviceDisplayName() {
+        let d1 = PairedDevice(name: "Pixel", publicKey: Data(), lastHost: "10.0.0.1")
+        XCTAssertEqual(d1.displayName, "Pixel")
+        let d2 = PairedDevice(name: "", publicKey: Data(), lastHost: "10.0.0.1")
+        XCTAssertEqual(d2.displayName, "10.0.0.1")
+    }
+
+    func testPairedDeviceCodable() throws {
+        let device = PairedDevice(name: "Test", publicKey: Data([0xAB, 0xCD]), lastHost: "1.2.3.4")
+        let encoded = try JSONEncoder().encode(device)
+        let decoded = try JSONDecoder().decode(PairedDevice.self, from: encoded)
+        XCTAssertEqual(decoded.id, device.id)
+        XCTAssertEqual(decoded.name, device.name)
+        XCTAssertEqual(decoded.publicKey, device.publicKey)
+        XCTAssertEqual(decoded.lastHost, device.lastHost)
+    }
+
     // MARK: - DeviceDetails
 
     func testDeviceDetailsDefaultValues() {
