@@ -46,6 +46,14 @@ struct DeviceDetails: Equatable {
     }
 }
 
+struct DiscoveredDevice: Identifiable, Equatable {
+    let id: String
+    var name: String
+    var host: String
+    var port: UInt16
+    var isPaired: Bool
+}
+
 struct PairedDevice: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
