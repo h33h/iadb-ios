@@ -181,20 +181,27 @@ struct SavedDeviceRow: View {
     let device: SavedDevice
     let onConnect: () -> Void
 
+    private var isPaired: Bool { device.port == 0 }
+
     var body: some View {
         Button(action: onConnect) {
             HStack {
-                Image(systemName: "desktopcomputer")
+                Image(systemName: isPaired ? "wifi" : "desktopcomputer")
                     .foregroundColor(.accentColor)
                     .frame(width: 30)
                 VStack(alignment: .leading) {
                     Text(device.displayName)
                         .font(.body)
-                    Text(device.address)
+                    Text(isPaired ? device.host : device.address)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
+                if isPaired {
+                    Text("Enter port")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
                 Image(systemName: "chevron.right")
                     .foregroundColor(.secondary)
                     .font(.caption)

@@ -66,6 +66,12 @@ struct ConnectionFeature {
                 .cancellable(id: CancelID.connection)
 
             case .connectToDevice(let device):
+                if device.port == 0 {
+                    // Paired-устройство без порта — заполняем quick connect
+                    state.hostInput = device.host
+                    state.portInput = ""
+                    return .none
+                }
                 return .send(.connect(host: device.host, port: device.port))
 
             case .quickConnect:
@@ -135,14 +141,13 @@ struct ConnectionFeature {
             case .pairing(.presented(.pairingResult(.success))):
                 guard let pairing = state.pairing else { return .none }
                 let host = pairing.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                let portStr = pairing.connectionPortInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                let port = UInt16(portStr) ?? 5555
                 let name = pairing.pairedDeviceName ?? ""
                 guard !host.isEmpty,
-                      !state.savedDevices.contains(where: { $0.host == host && $0.port == port }) else {
+                      !state.savedDevices.contains(where: { $0.host == host && $0.port == 0 }) else {
                     return .none
                 }
-                let device = SavedDevice(name: name, host: host, port: port)
+                // Порт 0 — paired-устройство без фиксированного порта
+                let device = SavedDevice(name: name, host: host, port: 0)
                 state.savedDevices.append(device)
                 return .run { [devices = state.savedDevices] _ in
                     savedDevicesClient.save(devices)

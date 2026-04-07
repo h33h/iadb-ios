@@ -8,6 +8,7 @@ enum ADBCommand: UInt32 {
     case ready      = 0x59414b4f  // OKAY
     case close      = 0x45534c43  // CLSE
     case write      = 0x45545257  // WRTE
+    case stls       = 0x534c5453  // STLS — запрос TLS-апгрейда (Android 11+)
 
     var magic: UInt32 {
         return rawValue ^ 0xFFFFFFFF
@@ -140,5 +141,9 @@ struct ADBMessage {
 
     static func closeMessage(localId: UInt32, remoteId: UInt32) -> ADBMessage {
         return ADBMessage(command: .close, arg0: localId, arg1: remoteId)
+    }
+
+    static func stlsMessage() -> ADBMessage {
+        return ADBMessage(command: .stls, arg0: version, arg1: 0)
     }
 }

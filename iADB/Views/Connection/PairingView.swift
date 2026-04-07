@@ -35,15 +35,6 @@ struct PairingView: View {
                 }
 
                 Section {
-                    TextField("Connection Port", text: $store.connectionPortInput)
-                        .keyboardType(.numberPad)
-                } header: {
-                    Text("Connection Port")
-                } footer: {
-                    Text("Port shown on the main 'Wireless debugging' screen (not the pairing port). The device will be saved for future connections.")
-                }
-
-                Section {
                     TextField("6-digit code", text: $store.pairingCode)
                         .keyboardType(.numberPad)
                         .font(.system(.title2, design: .monospaced))

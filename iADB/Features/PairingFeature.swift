@@ -7,10 +7,9 @@ struct PairingFeature {
     struct State: Equatable {
         var hostInput = ""
         var portInput = ""
-        var connectionPortInput = ""
         var pairingCode = ""
         var pairingState: PairingState = .idle
-        /// Данные для сохранения устройства после успешного pairing
+        /// Имя устройства после успешного pairing
         var pairedDeviceName: String?
     }
 

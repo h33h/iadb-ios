@@ -18,9 +18,8 @@ final class ADBClient: @unchecked Sendable {
     // MARK: - Connection
 
     func connect(host: String, port: UInt16 = 5555) async throws {
-        let identity = try crypto.tlsIdentity()
-        try await transport.connectTLS(host: host, port: port, identity: identity)
-        try await performHandshake()
+        try await transport.connect(host: host, port: port)
+        try await performHandshake(host: host, port: port)
     }
 
     func disconnect() {
@@ -28,22 +27,45 @@ final class ADBClient: @unchecked Sendable {
         deviceBanner = ""
     }
 
-    private func performHandshake() async throws {
-        // Send CNXN
+    private func performHandshake(host: String, port: UInt16) async throws {
         let connectMsg = ADBMessage.connectMessage()
         try await transport.sendMessage(connectMsg)
 
-        // Receive response — either CNXN (no auth) or AUTH
         let response = try await transport.receiveMessage()
 
         switch response.commandType {
         case .connect:
-            // Connected without auth
+            handleConnectResponse(response)
+        case .auth:
+            try await handleAuth(response)
+        case .stls:
+            try await handleSTLS(host: host, port: port)
+        default:
+            throw ADBError.protocolError("Unexpected response: \(String(format: "0x%08X", response.command))")
+        }
+    }
+
+    /// STLS: сервер запросил TLS-апгрейд. Отправляем STLS, переподключаемся с TLS,
+    /// и повторно отправляем CNXN — теперь mTLS-сертификат служит авторизацией.
+    private func handleSTLS(host: String, port: UInt16) async throws {
+        let stlsMsg = ADBMessage.stlsMessage()
+        try await transport.sendMessage(stlsMsg)
+        transport.disconnect()
+
+        let identity = try crypto.tlsIdentity()
+        try await transport.connectTLS(host: host, port: port, identity: identity)
+
+        let connectMsg = ADBMessage.connectMessage()
+        try await transport.sendMessage(connectMsg)
+        let response = try await transport.receiveMessage()
+
+        switch response.commandType {
+        case .connect:
             handleConnectResponse(response)
         case .auth:
             try await handleAuth(response)
         default:
-            throw ADBError.protocolError("Unexpected response: \(String(format: "0x%08X", response.command))")
+            throw ADBError.protocolError("Unexpected response after TLS: \(String(format: "0x%08X", response.command))")
         }
     }
 
