@@ -1,89 +1,124 @@
 import Foundation
+import Network
 import Security
 
 /// Low-level TCP transport for ADB protocol communication.
-/// Supports plain TCP and mid-connection TLS upgrade (STLS protocol).
-final class ADBTransport: NSObject, @unchecked Sendable {
-    private var session: URLSession?
-    private var streamTask: URLSessionStreamTask?
-    private var clientIdentity: SecIdentity?
-    private let lock = NSLock()
+///
+/// Uses NWConnection with a custom NWProtocolFramer (ADBSTLSFramer) that handles
+/// the STLS (StartTLS) protocol upgrade transparently. The connection flow:
+/// 1. Plain TCP connect → framer sends CNXN → receives A_STLS → sends A_STLS
+/// 2. Framer dynamically adds TLS 1.3 to the protocol stack
+/// 3. TLS handshake completes → NWConnection enters .ready
+/// 4. All subsequent I/O is encrypted via TLS
+final class ADBTransport: @unchecked Sendable {
+    private var connection: NWConnection?
+    private let queue = DispatchQueue(label: "com.iadb.transport", qos: .userInitiated)
 
     var isConnected: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return streamTask != nil
+        connection?.state == .ready
     }
 
     // MARK: - Connection
 
-    /// Plain TCP connection (no TLS yet — use upgradeTLS for STLS flow)
+    /// Connect to an ADB device with automatic STLS TLS upgrade.
+    /// The STLS protocol negotiation (CNXN → STLS → TLS handshake) is handled
+    /// internally by ADBSTLSFramer. When this method returns, TLS is established.
+    func connectSTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 30) async throws {
+        disconnect()
+
+        // Configure the STLS framer with the client identity for mTLS
+        ADBSTLSFramer.clientIdentity = identity
+
+        // Build protocol stack: App ↔ ADBSTLSFramer ↔ TLS (added dynamically) ↔ TCP
+        let parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+        parameters.allowLocalEndpointReuse = true
+
+        let framerOptions = NWProtocolFramer.Options(definition: ADBSTLSFramer.definition)
+        parameters.defaultProtocolStack.applicationProtocols.insert(framerOptions, at: 0)
+
+        let nwHost = NWEndpoint.Host(host)
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
+        self.connection = conn
+
+        try await startConnection(conn, timeout: timeout)
+    }
+
+    /// Plain TCP connection without STLS (fallback for legacy devices).
     func connect(host: String, port: UInt16, timeout: TimeInterval = 10) async throws {
         disconnect()
 
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = timeout
-        config.timeoutIntervalForResource = timeout * 3
+        let parameters = NWParameters.tcp
+        parameters.allowLocalEndpointReuse = true
 
-        let opQueue = OperationQueue()
-        opQueue.qualityOfService = .userInitiated
-        let sess = URLSession(configuration: config, delegate: self, delegateQueue: opQueue)
+        let nwHost = NWEndpoint.Host(host)
+        let nwPort = NWEndpoint.Port(rawValue: port)!
+        let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
+        self.connection = conn
 
-        let task = sess.streamTask(withHostName: host, port: Int(port))
-        task.resume()
-
-        lock.lock()
-        self.session = sess
-        self.streamTask = task
-        lock.unlock()
-
-        // Verify connection by attempting a zero-byte read with timeout.
-        // URLSessionStreamTask doesn't have a "connected" callback — the first I/O
-        // operation triggers actual TCP connect. We do a minimal read to surface
-        // errors early (e.g., connection refused).
+        try await startConnection(conn, timeout: timeout)
     }
 
-    /// Upgrade the current plain-TCP connection to TLS 1.3 with mutual authentication.
-    /// Must be called AFTER sending the A_STLS message to the device.
-    ///
-    /// Per AOSP protocol: `startSecureConnection()` completes all enqueued writes
-    /// before beginning the TLS handshake, so the A_STLS packet is guaranteed to
-    /// be sent in plaintext before TLS begins.
-    func upgradeTLS(identity: SecIdentity) {
-        lock.lock()
-        self.clientIdentity = identity
-        let task = self.streamTask
-        lock.unlock()
+    private func startConnection(_ conn: NWConnection, timeout: TimeInterval) async throws {
+        return try await withCheckedThrowingContinuation { continuation in
+            var resumed = false
+            let lock = NSLock()
 
-        task?.startSecureConnection()
+            func safeResume(_ block: () -> Void) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !resumed else { return }
+                resumed = true
+                block()
+            }
+
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    safeResume { continuation.resume() }
+                case .waiting:
+                    // NWConnection may enter .waiting during TLS handshake
+                    // with self-signed certs — wait for .ready.
+                    break
+                case .failed(let error):
+                    safeResume { continuation.resume(throwing: ADBError.connectionFailed(error.localizedDescription)) }
+                case .cancelled:
+                    safeResume { continuation.resume(throwing: ADBError.connectionClosed) }
+                default:
+                    break
+                }
+            }
+            conn.start(queue: self.queue)
+
+            self.queue.asyncAfter(deadline: .now() + timeout) {
+                safeResume {
+                    conn.cancel()
+                    continuation.resume(throwing: ADBError.timeout)
+                }
+            }
+        }
     }
 
     func disconnect() {
-        lock.lock()
-        let task = streamTask
-        let sess = session
-        streamTask = nil
-        session = nil
-        clientIdentity = nil
-        lock.unlock()
-
-        task?.cancel()
-        sess?.invalidateAndCancel()
+        connection?.cancel()
+        connection = nil
     }
 
     // MARK: - Send / Receive
 
     func send(_ data: Data) async throws {
-        guard let task = currentTask() else { throw ADBError.notConnected }
+        guard let conn = connection else {
+            throw ADBError.notConnected
+        }
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            task.write(data, timeout: 30) { error in
+        return try await withCheckedThrowingContinuation { continuation in
+            conn.send(content: data, completion: .contentProcessed { error in
                 if let error = error {
                     continuation.resume(throwing: ADBError.sendFailed(error.localizedDescription))
                 } else {
                     continuation.resume()
                 }
-            }
+            })
         }
     }
 
@@ -91,6 +126,7 @@ final class ADBTransport: NSObject, @unchecked Sendable {
         try await send(message.serialized)
     }
 
+    /// Receive a message with optional timeout (default: no timeout)
     func receiveMessage(timeout: TimeInterval? = nil) async throws -> ADBMessage {
         if let timeout = timeout {
             return try await withTimeout(timeout) {
@@ -132,8 +168,10 @@ final class ADBTransport: NSObject, @unchecked Sendable {
         return message
     }
 
-    func receive(exactly count: Int) async throws -> Data {
-        guard let task = currentTask() else { throw ADBError.notConnected }
+    private func receive(exactly count: Int) async throws -> Data {
+        guard let conn = connection else {
+            throw ADBError.notConnected
+        }
 
         var buffer = Data()
         buffer.reserveCapacity(count)
@@ -141,12 +179,12 @@ final class ADBTransport: NSObject, @unchecked Sendable {
         while buffer.count < count {
             let remaining = count - buffer.count
             let chunk: Data = try await withCheckedThrowingContinuation { continuation in
-                task.readData(ofMinLength: 1, maxLength: remaining, timeout: 30) { data, atEOF, error in
+                conn.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
                     if let error = error {
                         continuation.resume(throwing: ADBError.receiveFailed(error.localizedDescription))
                     } else if let data = data, !data.isEmpty {
                         continuation.resume(returning: data)
-                    } else if atEOF {
+                    } else if isComplete {
                         continuation.resume(throwing: ADBError.connectionClosed)
                     } else {
                         continuation.resume(throwing: ADBError.receiveFailed("No data received"))
@@ -157,14 +195,6 @@ final class ADBTransport: NSObject, @unchecked Sendable {
         }
 
         return buffer
-    }
-
-    // MARK: - Helpers
-
-    private func currentTask() -> URLSessionStreamTask? {
-        lock.lock()
-        defer { lock.unlock() }
-        return streamTask
     }
 
     private func withTimeout<T: Sendable>(_ timeout: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
@@ -181,60 +211,6 @@ final class ADBTransport: NSObject, @unchecked Sendable {
             }
             group.cancelAll()
             return result
-        }
-    }
-}
-
-// MARK: - URLSession TLS Delegate
-
-extension ADBTransport: URLSessionDelegate, URLSessionTaskDelegate {
-
-    /// Handle TLS authentication challenges for mTLS and self-signed certificate acceptance.
-    func urlSession(
-        _ session: URLSession,
-        task: URLSessionTask,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        let method = challenge.protectionSpace.authenticationMethod
-
-        if method == NSURLAuthenticationMethodClientCertificate {
-            lock.lock()
-            let identity = clientIdentity
-            lock.unlock()
-
-            if let identity = identity {
-                let credential = URLCredential(identity: identity, certificates: nil, persistence: .forSession)
-                completionHandler(.useCredential, credential)
-            } else {
-                completionHandler(.cancelAuthenticationChallenge, nil)
-            }
-        } else if method == NSURLAuthenticationMethodServerTrust {
-            // Accept self-signed certificates (ADB uses self-signed on both sides)
-            if let trust = challenge.protectionSpace.serverTrust {
-                completionHandler(.useCredential, URLCredential(trust: trust))
-            } else {
-                completionHandler(.performDefaultHandling, nil)
-            }
-        } else {
-            completionHandler(.performDefaultHandling, nil)
-        }
-    }
-
-    /// Session-level challenge (fallback for server trust)
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
-            if let trust = challenge.protectionSpace.serverTrust {
-                completionHandler(.useCredential, URLCredential(trust: trust))
-            } else {
-                completionHandler(.performDefaultHandling, nil)
-            }
-        } else {
-            completionHandler(.performDefaultHandling, nil)
         }
     }
 }
