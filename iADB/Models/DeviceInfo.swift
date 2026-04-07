@@ -1,28 +1,5 @@
 import Foundation
 
-/// Represents a saved device connection
-struct SavedDevice: Identifiable, Codable, Hashable {
-    let id: UUID
-    var name: String
-    var host: String
-    var port: UInt16
-
-    init(name: String = "", host: String, port: UInt16 = 5555) {
-        self.id = UUID()
-        self.name = name
-        self.host = host
-        self.port = port
-    }
-
-    var displayName: String {
-        name.isEmpty ? "\(host):\(port)" : name
-    }
-
-    var address: String {
-        "\(host):\(port)"
-    }
-}
-
 /// Detailed device info fetched via ADB
 struct DeviceDetails: Equatable {
     var model: String = ""
