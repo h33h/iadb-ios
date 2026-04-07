@@ -64,28 +64,28 @@ final class ADBTransportTests: XCTestCase {
         XCTAssertFalse(transport.isConnected)
     }
 
-    func testConnectToInvalidHostFailsOnIO() async {
-        // URLSessionStreamTask connects lazily — connect() itself succeeds,
-        // but the first I/O operation surfaces the DNS/network error.
+    func testConnectToInvalidHostThrows() async {
         let transport = ADBTransport()
-        try? await transport.connect(host: "999.999.999.999", port: 5555, timeout: 1)
-        XCTAssertTrue(transport.isConnected, "Transport should report connected (task created)")
-
         do {
-            _ = try await transport.receiveMessage(timeout: 5)
-            XCTFail("Expected error on I/O to invalid host")
+            try await transport.connect(host: "999.999.999.999", port: 5555, timeout: 2)
+            XCTFail("Expected error")
         } catch {
+            // Should fail with connection error or timeout
             XCTAssertNotNil(error)
         }
-        transport.disconnect()
     }
 
-    func testConnectThenDisconnect() async {
-        // Verify that connect + disconnect cycle works without crash
+    func testConnectTimeout() async {
         let transport = ADBTransport()
-        try? await transport.connect(host: "192.0.2.1", port: 5555, timeout: 1)
-        XCTAssertTrue(transport.isConnected)
-        transport.disconnect()
-        XCTAssertFalse(transport.isConnected)
+        let start = Date()
+        do {
+            // Connect to non-routable address with short timeout
+            try await transport.connect(host: "192.0.2.1", port: 5555, timeout: 2)
+            XCTFail("Expected timeout")
+        } catch {
+            let elapsed = Date().timeIntervalSince(start)
+            // Should not take much longer than timeout
+            XCTAssertLessThan(elapsed, 10.0)
+        }
     }
 }
