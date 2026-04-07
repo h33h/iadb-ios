@@ -26,7 +26,8 @@ enum ADBAuthType: UInt32 {
 struct ADBMessage {
     static let headerSize = 24
     static let maxPayload: UInt32 = 1024 * 1024
-    static let version: UInt32 = 0x01000000       // ADB version 1.0
+    static let version: UInt32 = 0x01000001       // ADB version (skip-checksum capable)
+    static let stlsVersion: UInt32 = 0x01000000   // A_STLS_VERSION per AOSP
 
     let command: UInt32
     let arg0: UInt32
@@ -144,6 +145,6 @@ struct ADBMessage {
     }
 
     static func stlsMessage() -> ADBMessage {
-        return ADBMessage(command: .stls, arg0: version, arg1: 0)
+        return ADBMessage(command: .stls, arg0: stlsVersion, arg1: 0)
     }
 }

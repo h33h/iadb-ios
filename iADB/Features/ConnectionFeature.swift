@@ -126,9 +126,18 @@ struct ConnectionFeature {
                     state.discoveredDevices[idx].isPaired = true
                     state.discoveredDevices[idx].name = name
                 }
-                return .run { [devices = state.pairedDevices] _ in
+
+                // Auto-connect after pairing: find the device's connect port from mDNS discovery
+                let connectDevice = state.discoveredDevices.first(where: { $0.host == host })
+                state.pairing = nil // dismiss pairing sheet
+
+                let saveEffect: Effect<ConnectionFeature.Action> = .run { [devices = state.pairedDevices] _ in
                     pairedDevicesClient.save(devices)
                 }
+                if let device = connectDevice {
+                    return .merge(saveEffect, .send(.connectToDevice(device)))
+                }
+                return saveEffect
 
             case .pairing:
                 return .none
