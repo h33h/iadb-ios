@@ -126,7 +126,12 @@ final class ADBSTLSFramer: NWProtocolFramerImplementation {
             }
 
             // Insert TLS into the protocol stack (below framer, above TCP)
-            framer.prependApplicationProtocol(options: tlsOptions)
+            do {
+                try framer.prependApplicationProtocol(options: tlsOptions)
+            } catch {
+                framer.markFailed(error: NWError.posix(.EPROTO))
+                return 0
+            }
 
             // Switch to passthrough — all future data flows through TLS transparently
             framer.passThroughInput()
