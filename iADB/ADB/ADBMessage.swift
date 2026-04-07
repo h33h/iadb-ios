@@ -97,7 +97,15 @@ struct ADBMessage {
 
     /// Validate message integrity
     var isValid: Bool {
-        return command ^ magic == 0xFFFFFFFF && dataCRC32 == ADBMessage.checksum(data)
+        return isValid(skipChecksum: false)
+    }
+
+    /// Validate message integrity, optionally skipping the checksum check.
+    /// After TLS upgrade (A_VERSION 0x01000001), the device may send dataCRC32 = 0.
+    func isValid(skipChecksum: Bool) -> Bool {
+        guard command ^ magic == 0xFFFFFFFF else { return false }
+        if skipChecksum { return true }
+        return dataCRC32 == ADBMessage.checksum(data)
     }
 
     var commandType: ADBCommand? {
