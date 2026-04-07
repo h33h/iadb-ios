@@ -6,32 +6,33 @@ import Testing
 @MainActor
 struct ConnectionFeatureTests {
     @Test
-    func onAppearLoadsSavedDevices() async {
-        let devices = [SavedDevice(name: "Test", host: "192.168.1.100", port: 5555)]
+    func onAppearStartsDiscovery() async {
         let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         } withDependencies: {
-            $0.savedDevicesClient.load = { devices }
+            $0.pairedDevicesClient.load = { [] }
+            $0.deviceDiscoveryClient.start = { _ in
+                AsyncStream { $0.yield([]); $0.finish() }
+            }
         }
 
         await store.send(.onAppear)
-        await store.receive(\.devicesLoaded) {
-            $0.savedDevices = devices
+        await store.receive(\.startDiscovery) {
+            $0.isScanning = true
         }
+        await store.receive(\.devicesUpdated)
     }
 
     @Test
-    func quickConnectSuccess() async {
-        let store = TestStore(
-            initialState: ConnectionFeature.State(hostInput: "192.168.1.100", portInput: "5555")
-        ) {
+    func connectToDeviceSuccess() async {
+        let device = DiscoveredDevice(id: "test", name: "Pixel", host: "10.0.0.1", port: 38745, isPaired: true)
+        let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         } withDependencies: {
             $0.adbClient.connect = { _, _ in "device::Pixel" }
         }
 
-        await store.send(.quickConnect)
-        await store.receive(\.connect) {
+        await store.send(.connectToDevice(device)) {
             $0.connectionState = .connecting
         }
         await store.receive(\.connectionResult.success) {
@@ -40,63 +41,19 @@ struct ConnectionFeatureTests {
     }
 
     @Test
-    func quickConnectEmptyHost() async {
-        let store = TestStore(
-            initialState: ConnectionFeature.State(hostInput: "", portInput: "5555")
-        ) {
-            ConnectionFeature()
-        }
-
-        await store.send(.quickConnect)
-    }
-
-    @Test
-    func quickConnectInvalidPort() async {
-        let store = TestStore(
-            initialState: ConnectionFeature.State(hostInput: "10.0.0.1", portInput: "abc")
-        ) {
-            ConnectionFeature()
-        }
-
-        await store.send(.quickConnect) {
-            $0.connectionState = .error("Invalid port number")
-        }
-    }
-
-    @Test
-    func quickConnectError() async {
-        let store = TestStore(
-            initialState: ConnectionFeature.State(hostInput: "192.168.1.100", portInput: "5555")
-        ) {
+    func connectToDeviceError() async {
+        let device = DiscoveredDevice(id: "test", name: "Pixel", host: "10.0.0.1", port: 38745, isPaired: true)
+        let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         } withDependencies: {
             $0.adbClient.connect = { _, _ in throw ADBError.connectionFailed("timeout") }
         }
 
-        await store.send(.quickConnect)
-        await store.receive(\.connect) {
+        await store.send(.connectToDevice(device)) {
             $0.connectionState = .connecting
         }
         await store.receive(\.connectionResult.failure) {
             $0.connectionState = .error("Connection failed: timeout")
-        }
-    }
-
-    @Test
-    func connectToSavedDevice() async {
-        let device = SavedDevice(name: "Test", host: "10.0.0.1", port: 5555)
-        let store = TestStore(initialState: ConnectionFeature.State()) {
-            ConnectionFeature()
-        } withDependencies: {
-            $0.adbClient.connect = { _, _ in "device::banner" }
-        }
-
-        await store.send(.connectToDevice(device))
-        await store.receive(\.connect) {
-            $0.connectionState = .connecting
-        }
-        await store.receive(\.connectionResult.success) {
-            $0.connectionState = .connected
         }
     }
 
@@ -118,101 +75,59 @@ struct ConnectionFeatureTests {
     }
 
     @Test
-    func addDevice() async {
-        var savedDevices: [SavedDevice]?
-        let store = TestStore(
-            initialState: ConnectionFeature.State(
-                hostInput: "192.168.1.50",
-                portInput: "5555",
-                deviceNameInput: "My Phone"
-            )
-        ) {
-            ConnectionFeature()
-        } withDependencies: {
-            $0.savedDevicesClient.save = { devices in savedDevices = devices }
-        }
-
-        store.exhaustivity = .off
-        await store.send(.addDevice)
-        store.exhaustivity = .on
-
-        #expect(store.state.savedDevices.count == 1)
-        #expect(store.state.savedDevices[0].host == "192.168.1.50")
-        #expect(store.state.savedDevices[0].name == "My Phone")
-        #expect(store.state.hostInput == "")
-        #expect(store.state.portInput == "5555")
-        #expect(store.state.showingAddDevice == false)
-        #expect(savedDevices?.count == 1)
-    }
-
-    @Test
-    func addDeviceRejectsDuplicate() async {
-        let existing = SavedDevice(name: "Phone", host: "10.0.0.1", port: 5555)
-        let store = TestStore(
-            initialState: ConnectionFeature.State(
-                savedDevices: [existing],
-                hostInput: "10.0.0.1",
-                portInput: "5555",
-                deviceNameInput: "Dupe"
-            )
-        ) {
-            ConnectionFeature()
-        }
-
-        await store.send(.addDevice)
-        #expect(store.state.savedDevices.count == 1)
-    }
-
-    @Test
-    func removeDevice() async {
-        let device = SavedDevice(name: "Test", host: "1.2.3.4", port: 5555)
-        var savedDevices: [SavedDevice]?
-        let store = TestStore(
-            initialState: ConnectionFeature.State(savedDevices: [device])
-        ) {
-            ConnectionFeature()
-        } withDependencies: {
-            $0.savedDevicesClient.save = { devices in savedDevices = devices }
-        }
-
-        store.exhaustivity = .off
-        await store.send(.removeDevice(device)) {
-            $0.savedDevices = []
-        }
-
-        #expect(savedDevices?.isEmpty == true)
-    }
-
-    @Test
-    func showPairing() async {
+    func showManualPairing() async {
         let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         }
 
-        await store.send(.showPairing) {
+        await store.send(.showManualPairing) {
             $0.pairing = PairingFeature.State()
         }
     }
 
     @Test
-    func toggleAddDevice() async {
+    func showPairingForDevice() async {
+        let device = DiscoveredDevice(id: "test", name: "Galaxy", host: "10.0.0.5", port: 42100, isPaired: false)
         let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         }
 
-        await store.send(.toggleAddDevice) {
-            $0.showingAddDevice = true
+        await store.send(.showPairingForDevice(device)) {
+            $0.pairing = PairingFeature.State(
+                hostInput: "10.0.0.5",
+                portInput: "42100",
+                isPrefilled: true
+            )
         }
     }
 
     @Test
     func duplicateConnectIgnored() async {
+        let device = DiscoveredDevice(id: "test", name: "P", host: "1.2.3.4", port: 5555, isPaired: true)
         let store = TestStore(
             initialState: ConnectionFeature.State(connectionState: .connecting)
         ) {
             ConnectionFeature()
         }
 
-        await store.send(.connect(host: "1.2.3.4", port: 5555))
+        await store.send(.connectToDevice(device))
+    }
+
+    @Test
+    func devicesUpdatedMatchesPaired() async {
+        let paired = PairedDevice(name: "My Pixel", publicKey: Data([1]), lastHost: "10.0.0.1")
+        let discovered = [DiscoveredDevice(id: "s1", name: "adb-abc", host: "10.0.0.1", port: 38745, isPaired: false)]
+
+        let store = TestStore(
+            initialState: ConnectionFeature.State(pairedDevices: [paired])
+        ) {
+            ConnectionFeature()
+        }
+
+        await store.send(.devicesUpdated(discovered)) {
+            $0.discoveredDevices = [
+                DiscoveredDevice(id: "s1", name: "My Pixel", host: "10.0.0.1", port: 38745, isPaired: true)
+            ]
+        }
     }
 }
