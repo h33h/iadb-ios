@@ -17,16 +17,17 @@ struct PairingFeatureTests {
             PairingFeature()
         } withDependencies: {
             $0.adbPairing.pair = { _, _, _ in
-                ADBPairing.PeerInfo(name: "Pixel 7", guid: "", publicKey: Data())
+                ADBPairing.PeerInfo(name: "Pixel 7", guid: "", publicKey: Data([1, 2, 3]))
             }
         }
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
         }
-        await store.receive(\.pairingResult.success) {
+        await store.receive(\.pairingCompleted) {
             $0.pairingState = .success("Paired with Pixel 7")
             $0.pairedDeviceName = "Pixel 7"
+            $0.pairedDevicePublicKey = Data([1, 2, 3])
         }
     }
 

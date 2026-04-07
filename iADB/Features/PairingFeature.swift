@@ -9,8 +9,9 @@ struct PairingFeature {
         var portInput = ""
         var pairingCode = ""
         var pairingState: PairingState = .idle
-        /// Имя устройства после успешного pairing
         var pairedDeviceName: String?
+        var pairedDevicePublicKey: Data?
+        var isPrefilled = false
     }
 
     enum PairingState: Equatable {
@@ -34,6 +35,7 @@ struct PairingFeature {
         case binding(BindingAction<State>)
         case pairWithCode
         case pairingResult(Result<String, Error>)
+        case pairingCompleted(name: String, publicKey: Data)
         case reset
     }
 
@@ -61,11 +63,17 @@ struct PairingFeature {
 
                 return .run { send in
                     let peerInfo = try await adbPairing.pair(host, port, code)
-                    await send(.pairingResult(.success(peerInfo.name)))
+                    await send(.pairingCompleted(name: peerInfo.name, publicKey: peerInfo.publicKey))
                 } catch: { error, send in
                     await send(.pairingResult(.failure(error)))
                 }
                 .cancellable(id: CancelID.pairing)
+
+            case .pairingCompleted(let name, let publicKey):
+                state.pairingState = .success("Paired with \(name)")
+                state.pairedDeviceName = name
+                state.pairedDevicePublicKey = publicKey
+                return .none
 
             case .pairingResult(.success(let deviceName)):
                 state.pairingState = .success("Paired with \(deviceName)")

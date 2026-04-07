@@ -26,12 +26,18 @@ struct PairingView: View {
                         .keyboardType(.URL)
                         .autocapitalization(.none)
                         .disableAutocorrection(true)
+                        .disabled(store.isPrefilled)
                     TextField("Pairing Port", text: $store.portInput)
                         .keyboardType(.numberPad)
+                        .disabled(store.isPrefilled)
                 } header: {
                     Text("Pairing Address")
                 } footer: {
-                    Text("Enter the IP address and port shown in the 'Pair device with pairing code' dialog.")
+                    if store.isPrefilled {
+                        Text("Address detected automatically. Enter only the pairing code.")
+                    } else {
+                        Text("Enter the IP address and port shown in the 'Pair device with pairing code' dialog.")
+                    }
                 }
 
                 Section {
