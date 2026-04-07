@@ -29,6 +29,8 @@ struct DiscoveredDevice: Identifiable, Equatable {
     var host: String
     var port: UInt16
     var isPaired: Bool
+    /// Порт pairing-сервиса (появляется когда на Android нажали "Pair with code")
+    var pairingPort: UInt16?
 }
 
 struct PairedDevice: Identifiable, Codable, Equatable {

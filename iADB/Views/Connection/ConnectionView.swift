@@ -161,8 +161,12 @@ struct DiscoveredDeviceRow: View {
                     Text("Paired")
                         .font(.caption2)
                         .foregroundColor(.green)
+                } else if device.pairingPort != nil {
+                    Text("Ready to pair")
+                        .font(.caption2)
+                        .foregroundColor(.blue)
                 } else {
-                    Text("Tap to pair")
+                    Text("Not paired")
                         .font(.caption2)
                         .foregroundColor(.orange)
                 }

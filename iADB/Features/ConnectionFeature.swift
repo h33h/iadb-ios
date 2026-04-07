@@ -94,11 +94,19 @@ struct ConnectionFeature {
                 return .none
 
             case .showPairingForDevice(let device):
-                state.pairing = PairingFeature.State(
-                    hostInput: device.host,
-                    portInput: String(device.port),
-                    isPrefilled: true
-                )
+                if let pairingPort = device.pairingPort {
+                    // Pairing-сервис найден — IP и порт заполнены, нужен только код
+                    state.pairing = PairingFeature.State(
+                        hostInput: device.host,
+                        portInput: String(pairingPort),
+                        isPrefilled: true
+                    )
+                } else {
+                    // Pairing-сервис не найден — IP заполнен, порт вводится вручную
+                    state.pairing = PairingFeature.State(
+                        hostInput: device.host
+                    )
+                }
                 return .none
 
             case .showManualPairing:
