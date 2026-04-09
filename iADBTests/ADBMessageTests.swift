@@ -121,6 +121,30 @@ final class ADBMessageTests: XCTestCase {
         XCTAssertFalse(msg.isValid)
     }
 
+    func testMessageIsValidSkipChecksum() {
+        // Simulates a post-TLS message where the device sends dataCRC32 = 0
+        let msg = ADBMessage(
+            command: ADBCommand.connect.rawValue,
+            arg0: 0, arg1: 0,
+            dataLength: 3, dataCRC32: 0, // Device skips checksum after TLS
+            magic: ADBCommand.connect.magic,
+            data: Data([1, 2, 3])
+        )
+        XCTAssertFalse(msg.isValid) // Strict validation fails
+        XCTAssertTrue(msg.isValid(skipChecksum: true)) // Skip-checksum passes
+    }
+
+    func testMessageSkipChecksumStillValidatesMagic() {
+        let msg = ADBMessage(
+            command: ADBCommand.connect.rawValue,
+            arg0: 0, arg1: 0,
+            dataLength: 0, dataCRC32: 0,
+            magic: 0x12345678, // Wrong magic
+            data: Data()
+        )
+        XCTAssertFalse(msg.isValid(skipChecksum: true)) // Magic must still match
+    }
+
     // MARK: - Serialization
 
     func testHeaderBytesSize() {

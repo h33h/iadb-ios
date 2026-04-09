@@ -14,6 +14,11 @@ final class ADBTransport: @unchecked Sendable {
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.iadb.transport", qos: .userInitiated)
 
+    /// When true, skip checksum validation on received messages.
+    /// Set after STLS/TLS upgrade — ADB version 0x01000001 allows the device
+    /// to send dataCRC32 = 0 since TLS already guarantees integrity.
+    var skipChecksum = false
+
     var isConnected: Bool {
         connection?.state == .ready
     }
@@ -42,6 +47,7 @@ final class ADBTransport: @unchecked Sendable {
         self.connection = conn
 
         try await startConnection(conn, timeout: timeout)
+        skipChecksum = true
     }
 
     /// Plain TCP connection without STLS (fallback for legacy devices).
@@ -102,6 +108,7 @@ final class ADBTransport: @unchecked Sendable {
     func disconnect() {
         connection?.cancel()
         connection = nil
+        skipChecksum = false
     }
 
     // MARK: - Send / Receive
@@ -161,7 +168,7 @@ final class ADBTransport: @unchecked Sendable {
             data: payload
         )
 
-        guard message.isValid else {
+        guard message.isValid(skipChecksum: skipChecksum) else {
             throw ADBError.protocolError("Message validation failed")
         }
 
