@@ -4,15 +4,14 @@ import Security
 
 /// Low-level TCP transport for ADB protocol communication.
 ///
-/// Uses NWConnection with a custom NWProtocolFramer (ADBSTLSFramer) that handles
-/// the STLS (StartTLS) protocol upgrade transparently. The connection flow:
-/// 1. Plain TCP connect → framer sends CNXN → receives A_STLS → sends A_STLS
-/// 2. Framer dynamically adds TLS 1.3 to the protocol stack
-/// 3. TLS handshake completes → NWConnection enters .ready
-/// 4. All subsequent I/O is encrypted via TLS
+/// Поддерживает прямое TLS-подключение (mTLS) для _adb-tls-connect порта
+/// и plain TCP для fallback-сценариев.
 final class ADBTransport: @unchecked Sendable {
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.iadb.transport", qos: .userInitiated)
+
+    /// После TLS Android шлёт dataCRC32=0 (ADB v0x01000001 — TLS гарантирует целостность)
+    var skipChecksum = false
 
     var isConnected: Bool {
         connection?.state == .ready
@@ -20,21 +19,33 @@ final class ADBTransport: @unchecked Sendable {
 
     // MARK: - Connection
 
-    /// Connect to an ADB device with automatic STLS TLS upgrade.
-    /// The STLS protocol negotiation (CNXN → STLS → TLS handshake) is handled
-    /// internally by ADBSTLSFramer. When this method returns, TLS is established.
-    func connectSTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 30) async throws {
+    /// Прямое mTLS-подключение для Android 11+ Wireless Debugging.
+    /// Порт _adb-tls-connect принимает TLS сразу — без STLS-хендшейка.
+    func connectTLS(host: String, port: UInt16, identity: SecIdentity, timeout: TimeInterval = 30) async throws {
         disconnect()
 
-        // Configure the STLS framer with the client identity for mTLS
-        ADBSTLSFramer.clientIdentity = identity
+        let tlsOptions = NWProtocolTLS.Options()
 
-        // Build protocol stack: App ↔ ADBSTLSFramer ↔ TLS (added dynamically) ↔ TCP
-        let parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+        sec_protocol_options_set_min_tls_protocol_version(
+            tlsOptions.securityProtocolOptions,
+            .TLSv13
+        )
+
+        sec_protocol_options_set_verify_block(
+            tlsOptions.securityProtocolOptions,
+            { _, _, completionHandler in completionHandler(true) },
+            DispatchQueue.global(qos: .userInitiated)
+        )
+
+        if let secIdentity = sec_identity_create(identity) {
+            sec_protocol_options_set_local_identity(
+                tlsOptions.securityProtocolOptions,
+                secIdentity
+            )
+        }
+
+        let parameters = NWParameters(tls: tlsOptions)
         parameters.allowLocalEndpointReuse = true
-
-        let framerOptions = NWProtocolFramer.Options(definition: ADBSTLSFramer.definition)
-        parameters.defaultProtocolStack.applicationProtocols.insert(framerOptions, at: 0)
 
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(rawValue: port)!
@@ -42,9 +53,10 @@ final class ADBTransport: @unchecked Sendable {
         self.connection = conn
 
         try await startConnection(conn, timeout: timeout)
+        skipChecksum = true
     }
 
-    /// Plain TCP connection without STLS (fallback for legacy devices).
+    /// Plain TCP без TLS (fallback для legacy-устройств).
     func connect(host: String, port: UInt16, timeout: TimeInterval = 10) async throws {
         disconnect()
 
@@ -102,6 +114,7 @@ final class ADBTransport: @unchecked Sendable {
     func disconnect() {
         connection?.cancel()
         connection = nil
+        skipChecksum = false
     }
 
     // MARK: - Send / Receive
@@ -161,7 +174,7 @@ final class ADBTransport: @unchecked Sendable {
             data: payload
         )
 
-        guard message.isValid else {
+        guard message.isValid(skipChecksum: skipChecksum) else {
             throw ADBError.protocolError("Message validation failed")
         }
 

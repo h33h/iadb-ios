@@ -17,27 +17,23 @@ final class ADBClient: @unchecked Sendable {
 
     // MARK: - Connection
 
-    /// Connect to an Android device via the _adb-tls-connect port (Android 11+ Wireless Debugging).
-    ///
-    /// The STLS protocol upgrade (CNXN → A_STLS → TLS handshake) is handled
-    /// transparently by ADBSTLSFramer inside NWConnection. When connectSTLS
-    /// returns, the TLS 1.3 connection is already established.
-    ///
-    /// After TLS, the device sends CNXN to confirm authentication succeeded.
+    /// Прямое mTLS-подключение к _adb-tls-connect порту (Android 11+ Wireless Debugging).
+    /// После TLS-хендшейка отправляем CNXN и получаем ответ от устройства.
     func connect(host: String, port: UInt16 = 5555) async throws {
         let identity = try crypto.tlsIdentity()
 
-        // Connect with STLS protocol upgrade (CNXN + STLS + TLS handled by framer)
-        try await transport.connectSTLS(host: host, port: port, identity: identity)
+        try await transport.connectTLS(host: host, port: port, identity: identity)
 
-        // After TLS handshake, device sends CNXN to confirm authentication
+        // После TLS отправляем CNXN
+        let connectMsg = ADBMessage.connectMessage()
+        try await transport.sendMessage(connectMsg)
+
         let response = try await transport.receiveMessage(timeout: 30)
 
         switch response.commandType {
         case .connect:
             handleConnectResponse(response)
         case .auth:
-            // Device didn't recognize our cert — try auth flow
             try await handleAuth(response)
         default:
             throw ADBError.protocolError(

@@ -97,7 +97,14 @@ struct ADBMessage {
 
     /// Validate message integrity
     var isValid: Bool {
-        return command ^ magic == 0xFFFFFFFF && dataCRC32 == ADBMessage.checksum(data)
+        return isValid(skipChecksum: false)
+    }
+
+    /// После TLS (ADB v0x01000001) устройство может слать dataCRC32=0
+    func isValid(skipChecksum: Bool) -> Bool {
+        guard command ^ magic == 0xFFFFFFFF else { return false }
+        if skipChecksum { return true }
+        return dataCRC32 == ADBMessage.checksum(data)
     }
 
     var commandType: ADBCommand? {
