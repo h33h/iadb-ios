@@ -38,12 +38,17 @@ struct PairedDevice: Identifiable, Codable, Equatable {
     var name: String
     var publicKey: Data
     var lastHost: String
+    /// Persistent mDNS service name ("adb-R8YL10CLZCY-lKlRMT") — стабильный hash
+    /// device cert. Матчим именно по нему, потому что host/port меняются при
+    /// toggle wireless debug.
+    var serviceName: String?
 
-    init(name: String, publicKey: Data, lastHost: String) {
+    init(name: String, publicKey: Data, lastHost: String, serviceName: String? = nil) {
         self.id = UUID()
         self.name = name
         self.publicKey = publicKey
         self.lastHost = lastHost
+        self.serviceName = serviceName
     }
 
     var displayName: String {

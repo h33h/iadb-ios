@@ -61,6 +61,9 @@ final class ADBPairing: @unchecked Sendable {
         // Generate RSA key pair for ADB auth
         let crypto = try ADBCrypto()
         let publicKeyData = try crypto.adbPublicKey()
+        let pubKeyAdbString = String(data: publicKeyData, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? "<bad-utf8>"
+        ADBCrypto.log.info("PAIRING start host=\(host, privacy: .public):\(port, privacy: .public) origin=\(crypto.keyOrigin, privacy: .public) pubFingerprint=\(crypto.publicKeyFingerprint(), privacy: .public)")
+        ADBCrypto.log.info("PAIRING adb_pubkey to be sent: \(pubKeyAdbString, privacy: .public)")
 
         // AOSP pairing requires mutual TLS — generate client identity
         let identity = try crypto.tlsIdentity()
@@ -118,7 +121,9 @@ final class ADBPairing: @unchecked Sendable {
             throw PairingError.pairingRejected
         }
 
-        return try parsePeerInfo(decryptedPeerInfo)
+        let peer = try parsePeerInfo(decryptedPeerInfo)
+        ADBCrypto.log.info("PAIRING success host=\(host, privacy: .public):\(port, privacy: .public) deviceName=\(peer.name, privacy: .public)")
+        return peer
     }
 
     /// Parse a QR code string from Android wireless debugging.

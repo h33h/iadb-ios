@@ -1,5 +1,6 @@
 import Foundation
 import ComposableArchitecture
+import os
 
 @Reducer
 struct ConnectionFeature {
@@ -21,7 +22,7 @@ struct ConnectionFeature {
         case disconnect
         case connectionResult(Result<String, Error>)
         case showPairingForDevice(DiscoveredDevice)
-        case showManualPairing
+        case removePairedDevice(serviceName: String)
         case pairing(PresentationAction<PairingFeature.Action>)
     }
 
@@ -56,11 +57,13 @@ struct ConnectionFeature {
             case .devicesUpdated(var devices):
                 let paired = state.pairedDevices
                 for i in devices.indices {
-                    if paired.contains(where: { $0.lastHost == devices[i].host }) {
+                    // Матчим по serviceName (стабильный hash cert), а не по host.
+                    // host меняется при toggle wireless debug, serviceName — нет.
+                    if let match = paired.first(where: { $0.serviceName == devices[i].id })
+                        ?? paired.first(where: { $0.lastHost == devices[i].host }) // fallback для старых записей без serviceName
+                    {
                         devices[i].isPaired = true
-                        if let match = paired.first(where: { $0.lastHost == devices[i].host }) {
-                            devices[i].name = match.name
-                        }
+                        devices[i].name = match.name
                     }
                 }
                 state.discoveredDevices = devices
@@ -94,48 +97,74 @@ struct ConnectionFeature {
                 return .none
 
             case .showPairingForDevice(let device):
-                if let pairingPort = device.pairingPort {
-                    // Pairing-сервис найден — IP и порт заполнены, нужен только код
-                    state.pairing = PairingFeature.State(
-                        hostInput: device.host,
-                        portInput: String(pairingPort),
-                        isPrefilled: true
-                    )
-                } else {
-                    // Pairing-сервис не найден — IP заполнен, порт вводится вручную
-                    state.pairing = PairingFeature.State(
-                        hostInput: device.host
-                    )
+                guard let pairingPort = device.pairingPort else {
+                    // Без активного pairing-сервиса pair невозможен — нужно
+                    // нажать "Pair device with pairing code" на Android.
+                    return .none
                 }
+                state.pairing = PairingFeature.State(
+                    hostInput: device.host,
+                    portInput: String(pairingPort),
+                    isPrefilled: true,
+                    serviceName: device.id
+                )
                 return .none
 
-            case .showManualPairing:
-                state.pairing = PairingFeature.State()
-                return .none
+            case .removePairedDevice(let serviceName):
+                state.pairedDevices.removeAll { $0.serviceName == serviceName }
+                for i in state.discoveredDevices.indices where state.discoveredDevices[i].id == serviceName {
+                    state.discoveredDevices[i].isPaired = false
+                }
+                return .run { [devices = state.pairedDevices] _ in
+                    pairedDevicesClient.save(devices)
+                }
 
             case .pairing(.presented(.pairingCompleted(let name, let publicKey))):
                 guard let pairingState = state.pairing else { return .none }
                 let host = pairingState.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !host.isEmpty else { return .none }
-                guard !state.pairedDevices.contains(where: { $0.publicKey == publicKey }) else {
-                    return .none
+
+                let serviceName = pairingState.serviceName
+                if let svc = serviceName {
+                    state.pairedDevices.removeAll { $0.serviceName == svc }
+                } else {
+                    state.pairedDevices.removeAll { $0.publicKey == publicKey }
                 }
-                let paired = PairedDevice(name: name, publicKey: publicKey, lastHost: host)
+                let paired = PairedDevice(name: name, publicKey: publicKey, lastHost: host, serviceName: serviceName)
                 state.pairedDevices.append(paired)
-                if let idx = state.discoveredDevices.firstIndex(where: { $0.host == host }) {
+
+                if let svc = serviceName,
+                   let idx = state.discoveredDevices.firstIndex(where: { $0.id == svc }) {
                     state.discoveredDevices[idx].isPaired = true
                     state.discoveredDevices[idx].name = name
                 }
 
-                // Auto-connect after pairing: find the device's connect port from mDNS discovery
-                let connectDevice = state.discoveredDevices.first(where: { $0.host == host })
+                // Auto-connect after pairing — ищем по serviceName, host мог уже измениться
+                let connectDevice = serviceName.flatMap { svc in
+                    state.discoveredDevices.first(where: { $0.id == svc })
+                } ?? state.discoveredDevices.first(where: { $0.host == host })
+
+                let log = Logger(subsystem: "com.iadb.app", category: "adb")
+                if let d = connectDevice {
+                    let endpoint = "\(d.host):\(d.port)"
+                    log.info("AUTO-CONNECT pairedHost=\(host, privacy: .public) → discovered=\(endpoint, privacy: .public)")
+                } else {
+                    let allHosts = state.discoveredDevices.map { "\($0.host):\($0.port)" }.joined(separator: ",")
+                    log.error("AUTO-CONNECT no discovered device for pairedHost=\(host, privacy: .public). Discovered: \(allHosts, privacy: .public)")
+                }
                 state.pairing = nil // dismiss pairing sheet
 
                 let saveEffect: Effect<ConnectionFeature.Action> = .run { [devices = state.pairedDevices] _ in
                     pairedDevicesClient.save(devices)
                 }
                 if let device = connectDevice {
-                    return .merge(saveEffect, .send(.connectToDevice(device)))
+                    // Задержка нужна, чтобы adbd успел зарегистрировать новый ключ
+                    // в trusted-list перед нашим TLS-подключением (race на commit).
+                    let delayedConnect: Effect<ConnectionFeature.Action> = .run { send in
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        await send(.connectToDevice(device))
+                    }
+                    return .merge(saveEffect, delayedConnect)
                 }
                 return saveEffect
 

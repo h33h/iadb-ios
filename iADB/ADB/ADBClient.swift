@@ -2,7 +2,7 @@ import Foundation
 
 /// High-level ADB client managing connections, authentication, and command execution
 final class ADBClient: @unchecked Sendable {
-    private let transport = ADBTransport()
+    private var transport: ADBTransportSTLS
     private let crypto: ADBCrypto
     private var nextLocalId: UInt32 = 1
     private let idLock = NSLock()
@@ -13,22 +13,61 @@ final class ADBClient: @unchecked Sendable {
 
     init() throws {
         self.crypto = try ADBCrypto()
+        let identity = try self.crypto.tlsIdentity()
+        self.transport = ADBTransportSTLS(identity: identity)
     }
 
     // MARK: - Connection
 
-    /// Прямое mTLS-подключение к _adb-tls-connect порту (Android 11+ Wireless Debugging).
-    /// После TLS-хендшейка отправляем CNXN и получаем ответ от устройства.
+    /// AOSP `_adb-tls-connect` flow: plain TCP → CNXN(plain) → STLS(plain) →
+    /// reply STLS(plain) → upgrade socket to TLS → продолжить.
+    /// Mac adb и rust adb_client используют именно эту схему. Direct-TLS
+    /// (как было раньше) AOSP-сервер закрывает с RST.
     func connect(host: String, port: UInt16 = 5555) async throws {
-        let identity = try crypto.tlsIdentity()
+        ADBCrypto.log.info("CONNECT start host=\(host, privacy: .public):\(port, privacy: .public) origin=\(self.crypto.keyOrigin, privacy: .public) pubFingerprint=\(self.crypto.publicKeyFingerprint(), privacy: .public)")
 
-        try await transport.connectTLS(host: host, port: port, identity: identity)
+        try await transport.connect(host: host, port: port)
+        ADBCrypto.log.info("CONNECT TCP established")
 
-        // После TLS отправляем CNXN
+        // Plaintext CNXN
         let connectMsg = ADBMessage.connectMessage()
         try await transport.sendMessage(connectMsg)
+        ADBCrypto.log.info("CONNECT plaintext CNXN sent")
 
-        let response = try await transport.receiveMessage(timeout: 30)
+        let response = try await transport.receiveMessage(timeout: 15)
+        ADBCrypto.log.info("CONNECT first response cmd=\(String(format: "0x%08X", response.command), privacy: .public)")
+
+        switch response.commandType {
+        case .stls:
+            try await handleSTLS()
+        case .connect:
+            // Legacy: соединение незашифрованное.
+            handleConnectResponse(response)
+        case .auth:
+            try await handleAuth(response)
+        default:
+            throw ADBError.protocolError(
+                "Expected STLS/CNXN/AUTH, got \(String(format: "0x%08X", response.command))"
+            )
+        }
+    }
+
+    private func handleSTLS() async throws {
+        ADBCrypto.log.info("CONNECT got STLS, replying STLS and upgrading TLS")
+        try await transport.sendMessage(ADBMessage.stlsMessage())
+        try await transport.upgradeToTLS()
+        ADBCrypto.log.info("CONNECT TLS upgrade requested, awaiting CNXN/AUTH on TLS channel")
+
+        // После TLS-upgrade на encrypted канале — снова обмен.
+        // adbd либо сразу отвечает CNXN (наш cert pubkey trusted), либо AUTH.
+        let response: ADBMessage
+        do {
+            response = try await transport.receiveMessage(timeout: 30)
+        } catch {
+            ADBCrypto.log.error("CONNECT receive after TLS upgrade failed: \(error.localizedDescription, privacy: .public)")
+            throw error
+        }
+        ADBCrypto.log.info("CONNECT TLS response cmd=\(String(format: "0x%08X", response.command), privacy: .public)")
 
         switch response.commandType {
         case .connect:
@@ -37,7 +76,7 @@ final class ADBClient: @unchecked Sendable {
             try await handleAuth(response)
         default:
             throw ADBError.protocolError(
-                "Expected CNXN after TLS, got \(String(format: "0x%08X", response.command))"
+                "Expected CNXN/AUTH after TLS, got \(String(format: "0x%08X", response.command))"
             )
         }
     }
@@ -95,22 +134,41 @@ final class ADBClient: @unchecked Sendable {
         return id
     }
 
+    /// Читает следующее сообщение, адресованное конкретному стриму.
+    /// Все сообщения с другим arg1 (leftover от прошлых стримов) пропускаются.
+    private func receiveForStream(_ stream: ADBStream) async throws -> ADBMessage {
+        while true {
+            let msg = try await transport.receiveMessage()
+            if msg.arg1 == stream.localId {
+                return msg
+            }
+        }
+    }
+
     /// Open a stream to the given destination (e.g., "shell:ls", "sync:")
     func openStream(destination: String) async throws -> ADBStream {
         let localId = allocateLocalId()
         let openMsg = ADBMessage.openMessage(localId: localId, destination: destination)
         try await transport.sendMessage(openMsg)
 
-        let response = try await transport.receiveMessage()
-        guard response.commandType == .ready else {
-            if response.commandType == .close {
-                throw ADBError.commandFailed("Stream rejected for: \(destination)")
+        // Игнорируем чужие сообщения (arg1 != localId) — это leftover от
+        // предыдущих стримов (например, повторные CLSE, которые adbd шлёт
+        // при отсутствии нашего CLSE-ack).
+        while true {
+            let response = try await transport.receiveMessage()
+            if response.arg1 != localId {
+                continue
             }
-            throw ADBError.protocolError("Expected OKAY, got \(String(format: "0x%08X", response.command))")
+            switch response.commandType {
+            case .ready:
+                let remoteId = response.arg0
+                return ADBStream(localId: localId, remoteId: remoteId, transport: transport)
+            case .close:
+                throw ADBError.commandFailed("Stream rejected for: \(destination)")
+            default:
+                throw ADBError.protocolError("Expected OKAY, got \(String(format: "0x%08X", response.command))")
+            }
         }
-
-        let remoteId = response.arg0
-        return ADBStream(localId: localId, remoteId: remoteId, transport: transport)
     }
 
     // MARK: - Shell Commands
@@ -123,6 +181,9 @@ final class ADBClient: @unchecked Sendable {
         do {
             while true {
                 let message = try await transport.receiveMessage()
+                if message.arg1 != stream.localId {
+                    continue // не наш стрим
+                }
                 switch message.commandType {
                 case .write:
                     output.append(message.data)
@@ -130,6 +191,10 @@ final class ADBClient: @unchecked Sendable {
                         ADBMessage.readyMessage(localId: stream.localId, remoteId: stream.remoteId)
                     )
                 case .close:
+                    // Подтверждаем закрытие, чтобы adbd не слал дубли CLSE.
+                    try? await transport.sendMessage(
+                        ADBMessage.closeMessage(localId: stream.localId, remoteId: stream.remoteId)
+                    )
                     return String(data: output, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 default:
                     continue
@@ -240,7 +305,7 @@ final class ADBClient: @unchecked Sendable {
         )
 
         // Wait for OKAY
-        _ = try await transport.receiveMessage()
+        _ = try await receiveForStream(stream)
 
         let chunkSize = Int(maxData) - 8
         guard chunkSize > 0 else {
@@ -259,7 +324,7 @@ final class ADBClient: @unchecked Sendable {
             try await transport.sendMessage(
                 ADBMessage.writeMessage(localId: stream.localId, remoteId: stream.remoteId, data: dataCmd)
             )
-            _ = try await transport.receiveMessage()
+            _ = try await receiveForStream(stream)
 
             offset = end
         }
@@ -274,7 +339,7 @@ final class ADBClient: @unchecked Sendable {
         )
 
         // Read OKAY or FAIL
-        let response = try await transport.receiveMessage()
+        let response = try await receiveForStream(stream)
         if response.commandType == .write {
             if let text = response.dataString, text.hasPrefix("FAIL") {
                 let errorMsg = text.count > 8 ? String(text.dropFirst(8)) : "Unknown sync error"
@@ -303,11 +368,11 @@ final class ADBClient: @unchecked Sendable {
                 ADBMessage.writeMessage(localId: stream.localId, remoteId: stream.remoteId, data: recvCmd)
             )
 
-            _ = try await transport.receiveMessage()
+            _ = try await receiveForStream(stream)
 
             var fileData = Data()
             while true {
-                let msg = try await transport.receiveMessage()
+                let msg = try await receiveForStream(stream)
                 guard msg.commandType == .write else { break }
 
                 let payload = msg.data
@@ -315,7 +380,7 @@ final class ADBClient: @unchecked Sendable {
 
                 let tag = String(data: payload[0..<4], encoding: .utf8) ?? ""
                 let length = payload.withUnsafeBytes { buf in
-                    buf.load(fromByteOffset: 4, as: UInt32.self).littleEndian
+                    buf.loadUnaligned(fromByteOffset: 4, as: UInt32.self).littleEndian
                 }
 
                 if tag == "DATA" {

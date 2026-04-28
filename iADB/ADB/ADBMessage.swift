@@ -79,13 +79,15 @@ struct ADBMessage {
     /// Parse header from raw bytes
     static func parseHeader(from data: Data) -> (command: UInt32, arg0: UInt32, arg1: UInt32, dataLength: UInt32, dataCRC32: UInt32, magic: UInt32)? {
         guard data.count >= headerSize else { return nil }
+        // loadUnaligned, потому что URLSessionStreamTask возвращает Data со смещённым
+        // baseAddress; обычный load требует выравнивания UInt32 и крашится.
         return data.withUnsafeBytes { buf in
-            let command = buf.load(fromByteOffset: 0, as: UInt32.self).littleEndian
-            let arg0 = buf.load(fromByteOffset: 4, as: UInt32.self).littleEndian
-            let arg1 = buf.load(fromByteOffset: 8, as: UInt32.self).littleEndian
-            let dataLength = buf.load(fromByteOffset: 12, as: UInt32.self).littleEndian
-            let dataCRC32 = buf.load(fromByteOffset: 16, as: UInt32.self).littleEndian
-            let magic = buf.load(fromByteOffset: 20, as: UInt32.self).littleEndian
+            let command = buf.loadUnaligned(fromByteOffset: 0, as: UInt32.self).littleEndian
+            let arg0 = buf.loadUnaligned(fromByteOffset: 4, as: UInt32.self).littleEndian
+            let arg1 = buf.loadUnaligned(fromByteOffset: 8, as: UInt32.self).littleEndian
+            let dataLength = buf.loadUnaligned(fromByteOffset: 12, as: UInt32.self).littleEndian
+            let dataCRC32 = buf.loadUnaligned(fromByteOffset: 16, as: UInt32.self).littleEndian
+            let magic = buf.loadUnaligned(fromByteOffset: 20, as: UInt32.self).littleEndian
             return (command, arg0, arg1, dataLength, dataCRC32, magic)
         }
     }

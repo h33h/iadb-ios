@@ -29,13 +29,26 @@ struct ADBClientDependency: Sendable {
 extension ADBClientDependency: DependencyKey {
     static var liveValue: Self {
         let client = LockIsolated<ADBClient?>(nil)
+        // Сериализатор: ADB-протокол stream-based, один TCP. Параллельные shell/sync
+        // команды перемешали бы send/receive и порушили буфер. Все операции
+        // выполняются строго по очереди.
+        let serializer = RequestSerializer()
+
+        @Sendable func withClient<T: Sendable>(_ op: @escaping @Sendable (ADBClient) async throws -> T) async throws -> T {
+            try await serializer.run {
+                guard let c = client.value else { throw ADBError.notConnected }
+                return try await op(c)
+            }
+        }
 
         return Self(
             connect: { host, port in
-                let newClient = try ADBClient()
-                try await newClient.connect(host: host, port: port)
-                client.setValue(newClient)
-                return newClient.deviceBanner
+                try await serializer.run {
+                    let newClient = try ADBClient()
+                    try await newClient.connect(host: host, port: port)
+                    client.setValue(newClient)
+                    return newClient.deviceBanner
+                }
             },
             disconnect: {
                 client.value?.disconnect()
@@ -45,76 +58,58 @@ extension ADBClientDependency: DependencyKey {
                 client.value?.isConnected ?? false
             },
             shell: { command in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.shell(command)
+                try await withClient { try await $0.shell(command) }
             },
             getDeviceProperty: { property in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getDeviceProperty(property)
+                try await withClient { try await $0.getDeviceProperty(property) }
             },
             getDeviceModel: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getDeviceModel()
+                try await withClient { try await $0.getDeviceModel() }
             },
             getAndroidVersion: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getAndroidVersion()
+                try await withClient { try await $0.getAndroidVersion() }
             },
             getSDKVersion: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getSDKVersion()
+                try await withClient { try await $0.getSDKVersion() }
             },
             getBatteryLevel: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getBatteryLevel()
+                try await withClient { try await $0.getBatteryLevel() }
             },
             getDeviceSerial: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getDeviceSerial()
+                try await withClient { try await $0.getDeviceSerial() }
             },
             listPackages: { includeSystem in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.listPackages(includeSystem: includeSystem)
+                try await withClient { try await $0.listPackages(includeSystem: includeSystem) }
             },
             uninstallPackage: { name, keepData in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.uninstallPackage(name, keepData: keepData)
+                try await withClient { try await $0.uninstallPackage(name, keepData: keepData) }
             },
             forceStopApp: { name in
-                guard let c = client.value else { throw ADBError.notConnected }
-                try await c.forceStopApp(name)
+                try await withClient { try await $0.forceStopApp(name) }
             },
             clearAppData: { name in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.clearAppData(name)
+                try await withClient { try await $0.clearAppData(name) }
             },
             getAppInfo: { name in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.getAppInfo(name)
+                try await withClient { try await $0.getAppInfo(name) }
             },
             listDirectory: { path in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.listDirectory(path)
+                try await withClient { try await $0.listDirectory(path) }
             },
             pushData: { data, remotePath, mode in
-                guard let c = client.value else { throw ADBError.notConnected }
-                try await c.pushData(data, to: remotePath, mode: mode)
+                try await withClient { try await $0.pushData(data, to: remotePath, mode: mode) }
             },
             pullFile: { remotePath in
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.pullFile(remotePath: remotePath)
+                try await withClient { try await $0.pullFile(remotePath: remotePath) }
             },
             takeScreenshot: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.takeScreenshot()
+                try await withClient { try await $0.takeScreenshot() }
             },
             openLogcatStream: {
-                guard let c = client.value else { throw ADBError.notConnected }
-                return try await c.openLogcatStream()
+                try await withClient { try await $0.openLogcatStream() }
             },
             reboot: { mode in
-                guard let c = client.value else { throw ADBError.notConnected }
-                try await c.reboot(mode: mode)
+                try await withClient { try await $0.reboot(mode: mode) }
             }
         )
     }
