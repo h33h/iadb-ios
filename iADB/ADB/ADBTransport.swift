@@ -1,12 +1,15 @@
 import Foundation
 import Network
 import Security
+import os
 
 /// Low-level TCP transport for ADB protocol communication.
 ///
 /// Поддерживает прямое TLS-подключение (mTLS) для _adb-tls-connect порта
 /// и plain TCP для fallback-сценариев.
 final class ADBTransport: @unchecked Sendable {
+    static let log = Logger(subsystem: "com.iadb.app", category: "transport")
+
     private var connection: NWConnection?
     private let queue = DispatchQueue(label: "com.iadb.transport", qos: .userInitiated)
 
@@ -37,15 +40,17 @@ final class ADBTransport: @unchecked Sendable {
             DispatchQueue.global(qos: .userInitiated)
         )
 
-        if let secIdentity = sec_identity_create(identity) {
-            sec_protocol_options_set_local_identity(
-                tlsOptions.securityProtocolOptions,
-                secIdentity
-            )
+        guard let secIdentity = sec_identity_create(identity) else {
+            ADBTransport.log.error("connectTLS: sec_identity_create returned nil")
+            throw ADBError.cryptoError("Failed to create sec_identity_t for TLS")
         }
+        sec_protocol_options_set_local_identity(
+            tlsOptions.securityProtocolOptions,
+            secIdentity
+        )
+        ADBTransport.log.info("connectTLS: identity set OK, starting connection to \(host, privacy: .public):\(port, privacy: .public)")
 
         let parameters = NWParameters(tls: tlsOptions)
-        parameters.allowLocalEndpointReuse = true
 
         let nwHost = NWEndpoint.Host(host)
         let nwPort = NWEndpoint.Port(rawValue: port)!
@@ -86,17 +91,24 @@ final class ADBTransport: @unchecked Sendable {
 
             conn.stateUpdateHandler = { state in
                 switch state {
+                case .setup:
+                    ADBTransport.log.debug("NWConnection state: setup")
+                case .preparing:
+                    ADBTransport.log.debug("NWConnection state: preparing (DNS/TCP/TLS in progress)")
                 case .ready:
+                    ADBTransport.log.info("NWConnection state: ready (TLS handshake done)")
                     safeResume { continuation.resume() }
-                case .waiting:
-                    // NWConnection may enter .waiting during TLS handshake
-                    // with self-signed certs — wait for .ready.
-                    break
+                case .waiting(let error):
+                    // NWConnection может зависнуть в .waiting на self-signed TLS,
+                    // но если ждём слишком долго — реальная причина в error.
+                    ADBTransport.log.error("NWConnection state: waiting, error=\(error.localizedDescription, privacy: .public)")
                 case .failed(let error):
+                    ADBTransport.log.error("NWConnection state: failed, error=\(error.localizedDescription, privacy: .public)")
                     safeResume { continuation.resume(throwing: ADBError.connectionFailed(error.localizedDescription)) }
                 case .cancelled:
+                    ADBTransport.log.info("NWConnection state: cancelled")
                     safeResume { continuation.resume(throwing: ADBError.connectionClosed) }
-                default:
+                @unknown default:
                     break
                 }
             }
@@ -104,6 +116,7 @@ final class ADBTransport: @unchecked Sendable {
 
             self.queue.asyncAfter(deadline: .now() + timeout) {
                 safeResume {
+                    ADBTransport.log.error("NWConnection: timeout after \(timeout, privacy: .public)s, cancelling")
                     conn.cancel()
                     continuation.resume(throwing: ADBError.timeout)
                 }

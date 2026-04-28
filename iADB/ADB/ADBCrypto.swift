@@ -1,5 +1,7 @@
 import Foundation
 import Security
+import CryptoKit
+import os
 
 /// Handles RSA key generation and signing for ADB authentication
 final class ADBCrypto {
@@ -7,8 +9,11 @@ final class ADBCrypto {
     private static let keySizeInBits = 2048
     private static let rsaNumWords = 64 // 2048 / 32
 
+    static let log = Logger(subsystem: "com.iadb.app", category: "adb")
+
     private let privateKey: SecKey
     let publicKey: SecKey
+    private(set) var keyOrigin: String = "unknown"
 
     init() throws {
         if let existingKey = ADBCrypto.loadPrivateKey() {
@@ -17,16 +22,29 @@ final class ADBCrypto {
                 throw ADBError.cryptoError("Failed to extract public key")
             }
             self.publicKey = pubKey
+            self.keyOrigin = "keychain"
         } else {
-            let (priv, pub) = try ADBCrypto.generateKeyPair()
+            let (priv, pub, origin) = try ADBCrypto.generateKeyPair()
             self.privateKey = priv
             self.publicKey = pub
+            self.keyOrigin = origin
         }
+        ADBCrypto.log.info("ADBCrypto init: origin=\(self.keyOrigin, privacy: .public) pubFingerprint=\(self.publicKeyFingerprint(), privacy: .public)")
+    }
+
+    /// SHA256 fingerprint публичного ключа (PKCS#1 DER) — для сверки между pairing и connect.
+    func publicKeyFingerprint() -> String {
+        var error: Unmanaged<CFError>?
+        guard let der = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+            return "<no-pubkey>"
+        }
+        let digest = SHA256.hash(data: der)
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Key Management
 
-    private static func generateKeyPair() throws -> (SecKey, SecKey) {
+    private static func generateKeyPair() throws -> (SecKey, SecKey, String) {
         // Try persistent key first (stored in keychain)
         let persistentAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
@@ -42,8 +60,11 @@ final class ADBCrypto {
             guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
                 throw ADBError.cryptoError("Failed to extract public key")
             }
-            return (privateKey, publicKey)
+            return (privateKey, publicKey, "keychain-new")
         }
+
+        let persistErr = error?.takeRetainedValue().localizedDescription ?? "unknown"
+        log.error("Persistent key generation failed: \(persistErr, privacy: .public) — falling back to ephemeral")
 
         // Fallback: generate ephemeral key without keychain (e.g. CI environment)
         let ephemeralAttributes: [String: Any] = [
@@ -60,7 +81,7 @@ final class ADBCrypto {
             throw ADBError.cryptoError("Failed to extract public key")
         }
 
-        return (privateKey, publicKey)
+        return (privateKey, publicKey, "ephemeral")
     }
 
     private static func loadPrivateKey() -> SecKey? {
@@ -386,7 +407,9 @@ final class ADBCrypto {
         SecItemDelete(query as CFDictionary)
     }
 
-    /// Build a minimal self-signed X.509 v1 certificate in DER format.
+    /// Build a self-signed X.509 v3 certificate in DER format.
+    /// Соответствует тому, что генерит AOSP `adb` для wireless debugging:
+    /// v3, CN=adb, EKU clientAuth+serverAuth, basicConstraints CA:false.
     func generateSelfSignedCert() throws -> Data {
         var error: Unmanaged<CFError>?
         guard let pkcs1DER = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
@@ -397,7 +420,13 @@ final class ADBCrypto {
         let oidSHA256RSA: [UInt8] = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b]
         let oidRSA: [UInt8]       = [0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01]
         let oidCN: [UInt8]        = [0x06, 0x03, 0x55, 0x04, 0x03]
+        let oidBasicConstraints: [UInt8] = [0x06, 0x03, 0x55, 0x1d, 0x13]
+        let oidKeyUsage: [UInt8]         = [0x06, 0x03, 0x55, 0x1d, 0x0f]
+        let oidExtKeyUsage: [UInt8]      = [0x06, 0x03, 0x55, 0x1d, 0x25]
+        let oidClientAuth: [UInt8]       = [0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x02]
+        let oidServerAuth: [UInt8]       = [0x06, 0x08, 0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01]
         let derNull: [UInt8]      = [0x05, 0x00]
+        let derTrue: [UInt8]      = [0x01, 0x01, 0xFF]
 
         let sigAlgo = derTag(0x30, Data(oidSHA256RSA + derNull))
 
@@ -417,8 +446,28 @@ final class ADBCrypto {
         // Serial number
         let serial = derTag(0x02, Data([0x01]))
 
-        // TBSCertificate (v1 — no explicit version tag needed)
-        let tbs = derTag(0x30, serial + sigAlgo + name + validity + name + spki)
+        // X.509 v3 marker: [0] EXPLICIT INTEGER 2
+        let version = derTag(0xA0, derTag(0x02, Data([0x02])))
+
+        // Extensions
+        // basicConstraints: CA=FALSE (critical, пустой SEQUENCE)
+        let bcValue = derTag(0x30, Data())
+        let bcExt = derTag(0x30, Data(oidBasicConstraints) + Data(derTrue) + derTag(0x04, bcValue))
+
+        // keyUsage: digitalSignature(0) + keyEncipherment(2) (critical)
+        // BIT STRING: 1 unused bit, 0b10100000 = 0xA0
+        let kuValue = derTag(0x03, Data([0x02, 0xA0]))
+        let kuExt = derTag(0x30, Data(oidKeyUsage) + Data(derTrue) + derTag(0x04, kuValue))
+
+        // extKeyUsage: clientAuth + serverAuth
+        let ekuValue = derTag(0x30, Data(oidClientAuth) + Data(oidServerAuth))
+        let ekuExt = derTag(0x30, Data(oidExtKeyUsage) + derTag(0x04, ekuValue))
+
+        let extensionsSeq = derTag(0x30, bcExt + kuExt + ekuExt)
+        let extensions = derTag(0xA3, extensionsSeq)  // [3] EXPLICIT
+
+        // TBSCertificate v3
+        let tbs = derTag(0x30, version + serial + sigAlgo + name + validity + name + spki + extensions)
 
         // Sign TBSCertificate
         error = nil

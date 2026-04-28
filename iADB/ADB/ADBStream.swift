@@ -4,10 +4,10 @@ import Foundation
 final class ADBStream: @unchecked Sendable {
     let localId: UInt32
     let remoteId: UInt32
-    private let transport: ADBTransport
+    private let transport: ADBTransportSTLS
     private(set) var isClosed = false
 
-    init(localId: UInt32, remoteId: UInt32, transport: ADBTransport) {
+    init(localId: UInt32, remoteId: UInt32, transport: ADBTransportSTLS) {
         self.localId = localId
         self.remoteId = remoteId
         self.transport = transport

@@ -12,6 +12,8 @@ struct PairingFeature {
         var pairedDeviceName: String?
         var pairedDevicePublicKey: Data?
         var isPrefilled = false
+        /// mDNS service name спариваемого устройства (если pair вызван из discovery).
+        var serviceName: String?
     }
 
     enum PairingState: Equatable {

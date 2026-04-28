@@ -49,8 +49,17 @@ struct ConnectionView: View {
                             DiscoveredDeviceRow(device: device) {
                                 if device.isPaired {
                                     store.send(.connectToDevice(device))
-                                } else {
+                                } else if device.pairingPort != nil {
                                     store.send(.showPairingForDevice(device))
+                                }
+                            }
+                            .swipeActions(edge: .trailing) {
+                                if device.isPaired {
+                                    Button(role: .destructive) {
+                                        store.send(.removePairedDevice(serviceName: device.id))
+                                    } label: {
+                                        Label("Unpair", systemImage: "trash")
+                                    }
                                 }
                             }
                         }
@@ -67,32 +76,6 @@ struct ConnectionView: View {
                 }
 
                 Section {
-                    Button {
-                        store.send(.showManualPairing)
-                    } label: {
-                        HStack {
-                            Image(systemName: "link.badge.plus")
-                                .foregroundColor(.accentColor)
-                                .frame(width: 30)
-                            VStack(alignment: .leading) {
-                                Text("Pair New Device")
-                                    .font(.body)
-                                Text("Enter pairing code manually")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .foregroundColor(.secondary)
-                                .font(.caption)
-                        }
-                    }
-                    .foregroundColor(.primary)
-                } header: {
-                    Text("Pair")
-                }
-
-                Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Label("How to connect", systemImage: "questionmark.circle")
                             .font(.subheadline.bold())
@@ -100,11 +83,11 @@ struct ConnectionView: View {
                             .font(.caption)
                         Text("2. Enable 'Wireless debugging' in Developer Options")
                             .font(.caption)
-                        Text("3. Devices appear here automatically")
+                        Text("3. To pair: tap 'Pair device with pairing code' on Android, then tap the device here and enter the code")
                             .font(.caption)
-                        Text("4. First time: tap device → enter pairing code")
+                        Text("4. After pairing: tap device → connected")
                             .font(.caption)
-                        Text("5. After pairing: tap device → connected!")
+                        Text("5. Swipe left on a paired device to unpair")
                             .font(.caption)
                     }
                     .padding(.vertical, 4)

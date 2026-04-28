@@ -84,7 +84,16 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
                 group.leave()
             }
 
-            let conn = NWConnection(to: result.endpoint, using: .tcp)
+            // Принудительно резолвим в IPv4: AOSP adbd на некоторых Android-версиях
+            // отвергает TLS-handshake с IPv6 link-local источников. Mac adb по факту
+            // использует IPv4, и работает; наш iOS на link-local IPv6 валится с RST.
+            let ipv4Params = NWParameters.tcp
+            ipv4Params.allowLocalEndpointReuse = true
+            if let ipOptions = ipv4Params.defaultProtocolStack.internetProtocol as? NWProtocolIP.Options {
+                ipOptions.version = .v4
+            }
+
+            let conn = NWConnection(to: result.endpoint, using: ipv4Params)
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready, .waiting:
@@ -92,7 +101,11 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
                        case .hostPort(let h, let p) = ep {
                         let hostStr: String
                         switch h {
-                        case .ipv4(let a): hostStr = "\(a)"
+                        case .ipv4(let a):
+                            // IPv4Address.description иногда добавляет %en0 zone —
+                            // для IPv4 это невалидно и ломает NWEndpoint.Host позже.
+                            let bytes = [UInt8](a.rawValue)
+                            hostStr = bytes.count == 4 ? "\(bytes[0]).\(bytes[1]).\(bytes[2]).\(bytes[3])" : "\(a)"
                         case .ipv6(let a): hostStr = "\(a)"
                         default: hostStr = "\(h)"
                         }
