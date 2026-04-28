@@ -1,30 +1,56 @@
 import SwiftUI
+import UIKit
 import ComposableArchitecture
 
 struct DeviceInfoView: View {
     let store: StoreOf<DeviceInfoFeature>
     @State private var showingRebootMenu = false
+    @State private var showingExportSheet = false
+    @State private var copiedSnapshot = false
+
+    private var batteryDisplay: String {
+        let level = store.details.batteryLevel
+        let status = store.details.batteryStatus
+        switch (level.isEmpty, status.isEmpty) {
+        case (true, true): return ""
+        case (false, true): return level
+        case (true, false): return status
+        case (false, false): return "\(level) · \(status)"
+        }
+    }
+
+    private var batteryIcon: String {
+        switch store.details.batteryStatus {
+        case "Charging": return "battery.100.bolt"
+        case "Full": return "battery.100"
+        default: return "battery.75percent"
+        }
+    }
 
     var body: some View {
         NavigationStack {
-            List {
+            VStack(spacing: 12) {
                 if store.isLoading {
-                    Section {
-                        HStack {
-                            Spacer()
-                            ProgressView("Loading device info...")
-                            Spacer()
-                        }
-                    }
-                } else if let error = store.errorMessage {
-                    Section {
-                        Label(error, systemImage: "exclamationmark.triangle")
-                            .foregroundColor(.red)
-                        Button("Retry") {
-                            store.send(.fetchDeviceInfo)
-                        }
-                    }
-                } else {
+                    StatusBannerView(style: .progress, message: "Loading device info...", showsProgress: true)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                }
+
+                if let error = store.errorMessage {
+                    StatusBannerView(style: .error, message: error, actionTitle: "Retry", onAction: {
+                        store.send(.fetchDeviceInfo)
+                    })
+                    .padding(.horizontal)
+                    .padding(.top, store.isLoading ? 0 : 8)
+                }
+
+                if copiedSnapshot {
+                    StatusBannerView(style: .success, message: "Device snapshot copied")
+                        .padding(.horizontal)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+
+                List {
                     // Identity
                     Section("Identity") {
                         InfoRow(label: "Model", value: store.details.model)
@@ -43,8 +69,16 @@ struct DeviceInfoView: View {
 
                     // Hardware
                     Section("Hardware") {
-                        InfoRow(label: "Battery", value: store.details.batteryLevel, icon: "battery.75percent")
+                        InfoRow(label: "Battery", value: batteryDisplay, icon: batteryIcon)
                         InfoRow(label: "Screen", value: store.details.screenResolution, icon: "rectangle.dashed")
+                        InfoRow(label: "RAM Total", value: store.details.totalMemory, icon: "memorychip")
+                        InfoRow(label: "RAM Available", value: store.details.availableMemory, icon: "memorychip.fill")
+                    }
+
+                    if !store.details.ipAddress.isEmpty {
+                        Section("Network") {
+                            InfoRow(label: "IP Address", value: store.details.ipAddress, icon: "wifi")
+                        }
                     }
 
                     // Actions
@@ -59,7 +93,29 @@ struct DeviceInfoView: View {
             }
             .navigationTitle("Device Info")
             .toolbar {
-                ToolbarItem(placement: .primaryAction) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    if !store.details.snapshotText.isEmpty {
+                        Button {
+                            UIPasteboard.general.string = store.details.snapshotText
+                            withAnimation {
+                                copiedSnapshot = true
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                                withAnimation {
+                                    copiedSnapshot = false
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                        }
+
+                        Button {
+                            showingExportSheet = true
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                    }
+
                     Button {
                         store.send(.fetchDeviceInfo)
                     } label: {
@@ -78,6 +134,9 @@ struct DeviceInfoView: View {
                     store.send(.reboot(mode: "bootloader"))
                 }
                 Button("Cancel", role: .cancel) {}
+            }
+            .sheet(isPresented: $showingExportSheet) {
+                ShareTextSheet(text: store.details.snapshotText, fileName: "device-snapshot.txt")
             }
         }
     }

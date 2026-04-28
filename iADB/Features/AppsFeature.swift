@@ -3,6 +3,17 @@ import ComposableArchitecture
 
 @Reducer
 struct AppsFeature {
+    enum AppFilter: String, CaseIterable, Equatable {
+        case user = "User"
+        case system = "System"
+        case all = "All"
+    }
+
+    enum AppSort: String, CaseIterable, Equatable {
+        case name = "Name"
+        case package = "Package"
+    }
+
     @ObservableState
     struct State: Equatable {
         var apps: [AppInfo] = []
@@ -10,18 +21,39 @@ struct AppsFeature {
         var errorMessage: String?
         var statusMessage: String?
         var showSystemApps = false
+        var filter: AppFilter = .user
+        var sort: AppSort = .name
         var searchText = ""
         var selectedApp: AppInfo?
+        var appDetail: AppDetail?
         var showingAppDetail = false
         var appDetailText = ""
         var isInstalling = false
         var installProgress = ""
 
         var filteredApps: [AppInfo] {
-            guard !searchText.isEmpty else { return apps }
-            return apps.filter {
-                $0.packageName.localizedCaseInsensitiveContains(searchText) ||
-                ($0.appName?.localizedCaseInsensitiveContains(searchText) ?? false)
+            let visibilityFiltered = apps.filter { app in
+                switch filter {
+                case .user: return !app.isSystemApp
+                case .system: return app.isSystemApp
+                case .all: return true
+                }
+            }
+
+            let searched = searchText.isEmpty
+                ? visibilityFiltered
+                : visibilityFiltered.filter {
+                    $0.packageName.localizedCaseInsensitiveContains(searchText) ||
+                    ($0.appName?.localizedCaseInsensitiveContains(searchText) ?? false)
+                }
+
+            return searched.sorted { lhs, rhs in
+                switch sort {
+                case .name:
+                    return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+                case .package:
+                    return lhs.packageName.localizedCaseInsensitiveCompare(rhs.packageName) == .orderedAscending
+                }
             }
         }
     }
@@ -40,6 +72,8 @@ struct AppsFeature {
         case appDetailLoaded(Result<String, Error>)
         case installResult(Result<String, Error>)
         case dismissStatus
+        case setFilter(AppFilter)
+        case setSort(AppSort)
         case toggleSystemApps
     }
 
@@ -57,7 +91,6 @@ struct AppsFeature {
             case .loadApps:
                 state.isLoading = true
                 state.errorMessage = nil
-                let includeSystem = state.showSystemApps
 
                 return .run { send in
                     async let allPackages = adbClient.listPackages(true)
@@ -67,8 +100,7 @@ struct AppsFeature {
                     let apps = all.map { pkg in
                         AppInfo(packageName: pkg, isSystemApp: !user.contains(pkg))
                     }
-                    let filtered = includeSystem ? apps : apps.filter { !$0.isSystemApp }
-                    await send(.appsLoaded(.success(filtered)))
+                    await send(.appsLoaded(.success(apps)))
                 } catch: { error, send in
                     await send(.appsLoaded(.failure(error)))
                 }
@@ -112,6 +144,7 @@ struct AppsFeature {
 
             case .getAppDetail(let app):
                 state.selectedApp = app
+                state.appDetail = nil
                 return .run { send in
                     let detail = try await adbClient.getAppInfo(app.packageName)
                     await send(.appDetailLoaded(.success(detail)))
@@ -121,6 +154,9 @@ struct AppsFeature {
 
             case .appDetailLoaded(.success(let detail)):
                 state.appDetailText = detail
+                if let app = state.selectedApp {
+                    state.appDetail = AppDetail.parse(packageName: app.packageName, rawText: detail)
+                }
                 state.showingAppDetail = true
                 return .none
 
@@ -176,9 +212,19 @@ struct AppsFeature {
                 state.statusMessage = nil
                 return .none
 
+            case .setFilter(let filter):
+                state.filter = filter
+                state.showSystemApps = filter != .user
+                return .none
+
+            case .setSort(let sort):
+                state.sort = sort
+                return .none
+
             case .toggleSystemApps:
                 state.showSystemApps.toggle()
-                return .send(.loadApps)
+                state.filter = state.showSystemApps ? .all : .user
+                return .none
             }
         }
     }

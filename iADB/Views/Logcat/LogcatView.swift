@@ -1,12 +1,45 @@
 import SwiftUI
+import UIKit
 import ComposableArchitecture
 
 struct LogcatView: View {
     @Bindable var store: StoreOf<LogcatFeature>
+    @State private var showingExportSheet = false
+    @State private var exportText = ""
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                if !store.savedPresets.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(store.savedPresets) { preset in
+                                Button {
+                                    store.send(.applyPreset(preset))
+                                } label: {
+                                    Text(preset.name)
+                                        .font(.caption.weight(.medium))
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 6)
+                                        .background(Color.accentColor.opacity(0.12))
+                                        .cornerRadius(8)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button(role: .destructive) {
+                                        store.send(.deletePreset(preset.id))
+                                    } label: {
+                                        Label("Delete Preset", systemImage: "trash")
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                    }
+                }
+
                 // Controls bar
                 HStack(spacing: 12) {
                     // Start/Stop
@@ -87,6 +120,29 @@ struct LogcatView: View {
                 .padding(.horizontal)
                 .padding(.vertical, 6)
 
+                HStack(spacing: 8) {
+                    TextField("Preset name", text: $store.presetNameInput)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+
+                    Button("Save Preset") {
+                        store.send(.savePreset)
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                    .disabled(store.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    Button("Export") {
+                        exportText = exportString(from: store.filteredEntries)
+                        showingExportSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                    .disabled(store.filteredEntries.isEmpty)
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 8)
+
                 Divider()
 
                 // Log entries
@@ -125,6 +181,9 @@ struct LogcatView: View {
             }
             .navigationTitle("Logcat")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                store.send(.onAppear)
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     Toggle(isOn: $store.autoScroll) {
@@ -132,7 +191,19 @@ struct LogcatView: View {
                     }
                 }
             }
+            .sheet(isPresented: $showingExportSheet, onDismiss: {
+                exportText = ""
+                store.send(.clearExport)
+            }) {
+                ShareTextSheet(text: exportText, fileName: "logcat.txt")
+            }
         }
+    }
+
+    private func exportString(from entries: [LogEntry]) -> String {
+        entries
+            .map { "\($0.timestamp) \($0.pid) \($0.tid) \($0.level.rawValue) \($0.tag): \($0.message)" }
+            .joined(separator: "\n")
     }
 
     private func levelName(_ level: LogEntry.LogLevel) -> String {
@@ -147,6 +218,19 @@ struct LogcatView: View {
         case .unknown: return "Unknown"
         }
     }
+}
+
+struct ShareTextSheet: UIViewControllerRepresentable {
+    let text: String
+    let fileName: String
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        return UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 struct LogEntryRow: View {

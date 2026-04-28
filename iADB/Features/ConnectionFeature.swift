@@ -10,6 +10,8 @@ struct ConnectionFeature {
         var pairedDevices: [PairedDevice] = []
         var isScanning = false
         var connectionState: ConnectionState = .disconnected
+        var lastConnectionDevice: DiscoveredDevice?
+        var lastConnectionError: String?
         @Presents var pairing: PairingFeature.State?
     }
 
@@ -17,10 +19,14 @@ struct ConnectionFeature {
         case binding(BindingAction<State>)
         case onAppear
         case startDiscovery
+        case rescan
         case devicesUpdated([DiscoveredDevice])
         case connectToDevice(DiscoveredDevice)
+        case reconnectLastDevice
         case disconnect
+        case clearConnectionError
         case connectionResult(Result<String, Error>)
+        case showManualPairing
         case showPairingForDevice(DiscoveredDevice)
         case removePairedDevice(serviceName: String)
         case pairing(PresentationAction<PairingFeature.Action>)
@@ -54,6 +60,11 @@ struct ConnectionFeature {
                 }
                 .cancellable(id: CancelID.discovery)
 
+            case .rescan:
+                state.discoveredDevices = []
+                state.lastConnectionError = nil
+                return .send(.startDiscovery)
+
             case .devicesUpdated(var devices):
                 let paired = state.pairedDevices
                 for i in devices.indices {
@@ -67,11 +78,14 @@ struct ConnectionFeature {
                     }
                 }
                 state.discoveredDevices = devices
+                state.isScanning = false
                 return .none
 
             case .connectToDevice(let device):
                 guard state.connectionState != .connecting else { return .none }
                 state.connectionState = .connecting
+                state.lastConnectionDevice = device
+                state.lastConnectionError = nil
 
                 return .run { [host = device.host, port = device.port] send in
                     let banner = try await adbClient.connect(host, port)
@@ -81,6 +95,10 @@ struct ConnectionFeature {
                 }
                 .cancellable(id: CancelID.connection)
 
+            case .reconnectLastDevice:
+                guard let device = state.lastConnectionDevice else { return .none }
+                return .send(.connectToDevice(device))
+
             case .disconnect:
                 state.connectionState = .disconnected
                 return .merge(
@@ -88,24 +106,33 @@ struct ConnectionFeature {
                     .run { _ in adbClient.disconnect() }
                 )
 
+            case .clearConnectionError:
+                state.lastConnectionError = nil
+                if case .error = state.connectionState {
+                    state.connectionState = .disconnected
+                }
+                return .none
+
             case .connectionResult(.success):
                 state.connectionState = .connected
+                state.lastConnectionError = nil
                 return .none
 
             case .connectionResult(.failure(let error)):
-                state.connectionState = .error(error.localizedDescription)
+                let message = error.localizedDescription
+                state.connectionState = .error(message)
+                state.lastConnectionError = message
+                return .none
+
+            case .showManualPairing:
+                state.pairing = PairingFeature.State()
                 return .none
 
             case .showPairingForDevice(let device):
-                guard let pairingPort = device.pairingPort else {
-                    // Без активного pairing-сервиса pair невозможен — нужно
-                    // нажать "Pair device with pairing code" на Android.
-                    return .none
-                }
                 state.pairing = PairingFeature.State(
                     hostInput: device.host,
-                    portInput: String(pairingPort),
-                    isPrefilled: true,
+                    portInput: device.pairingPort.map(String.init) ?? "",
+                    isPrefilled: device.pairingPort != nil,
                     serviceName: device.id
                 )
                 return .none

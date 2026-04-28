@@ -13,6 +13,7 @@ struct ShellFeatureTests {
             ShellFeature()
         } withDependencies: {
             $0.adbClient.shell = { _ in "file1.txt\nfile2.txt" }
+            $0.shellPersistenceClient.save = { _ in }
         }
 
         await store.send(.executeCommand) {
@@ -40,6 +41,7 @@ struct ShellFeatureTests {
             ShellFeature()
         } withDependencies: {
             $0.adbClient.shell = { _ in throw ADBError.commandFailed("not found") }
+            $0.shellPersistenceClient.save = { _ in }
         }
 
         await store.send(.executeCommand) {
@@ -74,6 +76,7 @@ struct ShellFeatureTests {
             ShellFeature()
         } withDependencies: {
             $0.adbClient.shell = { _ in "output" }
+            $0.shellPersistenceClient.save = { _ in }
         }
 
         await store.send(.executeQuickCommand("df -h")) {
@@ -96,6 +99,8 @@ struct ShellFeatureTests {
             initialState: ShellFeature.State(history: [entry])
         ) {
             ShellFeature()
+        } withDependencies: {
+            $0.shellPersistenceClient.save = { _ in }
         }
 
         await store.send(.clearHistory) {
@@ -120,6 +125,7 @@ struct ShellFeatureTests {
             ShellFeature()
         } withDependencies: {
             $0.adbClient.shell = { cmd in "out-\(cmd)" }
+            $0.shellPersistenceClient.save = { _ in }
         }
 
         store.exhaustivity = .off
@@ -138,5 +144,54 @@ struct ShellFeatureTests {
         #expect(store.state.history.count == 2)
         #expect(store.state.history[0].command == "cmd2") // newest first
         #expect(store.state.history[1].command == "cmd1")
+    }
+
+    @Test
+    func onAppearLoadsPersistence() async {
+        let entry = ShellHistoryEntry(command: "getprop", output: "Pixel", timestamp: Date(), isError: false)
+        let store = TestStore(initialState: ShellFeature.State()) {
+            ShellFeature()
+        } withDependencies: {
+            $0.shellPersistenceClient.load = {
+                ShellPersistenceState(history: [entry], pinnedCommands: ["df -h"])
+            }
+        }
+
+        await store.send(.onAppear)
+        await store.receive(\.loadPersistence) {
+            $0.didLoadPersistence = true
+        }
+        await store.receive(\.persistenceLoaded) {
+            $0.history = [entry]
+            $0.pinnedCommands = ["df -h"]
+        }
+    }
+
+    @Test
+    func togglePinnedCommand() async {
+        let store = TestStore(initialState: ShellFeature.State()) {
+            ShellFeature()
+        } withDependencies: {
+            $0.shellPersistenceClient.save = { _ in }
+        }
+
+        await store.send(.togglePinnedCommand("df -h")) {
+            $0.pinnedCommands = ["df -h"]
+        }
+
+        await store.send(.togglePinnedCommand("df -h")) {
+            $0.pinnedCommands = []
+        }
+    }
+
+    @Test
+    func useHistoryCommand() async {
+        let store = TestStore(initialState: ShellFeature.State()) {
+            ShellFeature()
+        }
+
+        await store.send(.useHistoryCommand("pm list packages")) {
+            $0.commandInput = "pm list packages"
+        }
     }
 }

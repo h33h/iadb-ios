@@ -58,12 +58,31 @@ final class DeviceInfoTests: XCTestCase {
         XCTAssertEqual(details.displayTitle, "Android Device")
     }
 
+    func testSnapshotTextIncludesOnlyAvailableFields() {
+        var details = DeviceDetails()
+        details.model = "Pixel 9"
+        details.androidVersion = "15"
+        details.batteryLevel = "82%"
+        details.ipAddress = "192.168.1.10"
+
+        let snapshot = details.snapshotText
+
+        XCTAssertTrue(snapshot.contains("## Identity"))
+        XCTAssertTrue(snapshot.contains("Model: Pixel 9"))
+        XCTAssertTrue(snapshot.contains("## System"))
+        XCTAssertTrue(snapshot.contains("Android Version: 15"))
+        XCTAssertTrue(snapshot.contains("## Hardware"))
+        XCTAssertTrue(snapshot.contains("Battery Level: 82%"))
+        XCTAssertTrue(snapshot.contains("## Network"))
+        XCTAssertTrue(snapshot.contains("IP Address: 192.168.1.10"))
+        XCTAssertFalse(snapshot.contains("Manufacturer:"))
+    }
+
     // MARK: - ConnectionState
 
     func testConnectionStateStatusText() {
         XCTAssertEqual(ConnectionState.disconnected.statusText, "Disconnected")
         XCTAssertEqual(ConnectionState.connecting.statusText, "Connecting...")
-        XCTAssertEqual(ConnectionState.authenticating.statusText, "Waiting for device authorization...")
         XCTAssertEqual(ConnectionState.connected.statusText, "Connected")
         XCTAssertEqual(ConnectionState.error("fail").statusText, "Error: fail")
     }
@@ -71,7 +90,6 @@ final class DeviceInfoTests: XCTestCase {
     func testConnectionStateIsConnected() {
         XCTAssertFalse(ConnectionState.disconnected.isConnected)
         XCTAssertFalse(ConnectionState.connecting.isConnected)
-        XCTAssertFalse(ConnectionState.authenticating.isConnected)
         XCTAssertTrue(ConnectionState.connected.isConnected)
         XCTAssertFalse(ConnectionState.error("x").isConnected)
     }
