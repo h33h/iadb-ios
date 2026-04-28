@@ -54,6 +54,7 @@ struct LogcatFeature {
 
     @Dependency(\.adbClient) var adbClient
     @Dependency(\.logcatPersistenceClient) var logcatPersistenceClient
+    @Dependency(\.uuid) var uuid
 
     var body: some ReducerOf<Self> {
         BindingReducer()
@@ -156,7 +157,7 @@ struct LogcatFeature {
                 let trimmedName = state.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
                 let filterText = state.filterText.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmedName.isEmpty else { return .none }
-                let preset = LogcatPreset(name: trimmedName, filterText: filterText, level: state.selectedLevel)
+                let preset = LogcatPreset(id: uuid(), name: trimmedName, filterText: filterText, level: state.selectedLevel)
                 state.savedPresets.insert(preset, at: 0)
                 state.presetNameInput = ""
                 persist(state)

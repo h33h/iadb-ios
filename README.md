@@ -115,7 +115,6 @@ The repository includes GitHub Actions workflows for:
 - `iADB/` app source code
 - `iADBTests/` unit and feature tests
 - `.github/workflows/` CI pipelines
-- `docs/` design notes and implementation specs
 
 ## Contributing
 

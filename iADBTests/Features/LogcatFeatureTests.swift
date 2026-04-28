@@ -182,19 +182,22 @@ struct LogcatFeatureTests {
     }
 
     @Test
-    func saveApplyAndDeletePreset() async {
+    func saveApplyAndDeletePreset() async throws {
+        let presetID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         let store = TestStore(initialState: LogcatFeature.State(filterText: "Window", selectedLevel: .error, presetNameInput: "Errors")) {
             LogcatFeature()
         } withDependencies: {
             $0.logcatPersistenceClient.save = { _ in }
+            $0.uuid = .constant(presetID)
         }
 
         await store.send(.savePreset) {
-            $0.savedPresets = [LogcatPreset(name: "Errors", filterText: "Window", level: .error)]
+            $0.savedPresets = [LogcatPreset(id: presetID, name: "Errors", filterText: "Window", level: .error)]
             $0.presetNameInput = ""
         }
 
         let preset = try #require(store.state.savedPresets.first)
+        #expect(store.state.savedPresets.count == 1)
 
         await store.send(.applyPreset(LogcatPreset(name: "All Warnings", filterText: "Activity", level: .warning))) {
             $0.filterText = "Activity"
