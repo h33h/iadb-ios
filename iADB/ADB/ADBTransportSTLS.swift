@@ -6,7 +6,7 @@ import os
 /// plain TCP → plaintext CNXN → server STLS → client STLS → TLS upgrade → данные.
 /// Использует URLSessionStreamTask, потому что NWConnection не умеет TLS-upgrade
 /// на уже установленном сокете.
-final class ADBTransportSTLS: NSObject, @unchecked Sendable, URLSessionDelegate, URLSessionTaskDelegate, URLSessionStreamDelegate {
+final class ADBTransportSTLS: NSObject, @unchecked Sendable, ADBMessageTransport, URLSessionDelegate, URLSessionTaskDelegate, URLSessionStreamDelegate {
     static let log = Logger(subsystem: "com.iadb.app", category: "stls")
 
     private var session: URLSession!

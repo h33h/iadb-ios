@@ -7,7 +7,7 @@ import os
 ///
 /// Поддерживает прямое TLS-подключение (mTLS) для _adb-tls-connect порта
 /// и plain TCP для fallback-сценариев.
-final class ADBTransport: @unchecked Sendable {
+final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
     static let log = Logger(subsystem: "com.iadb.app", category: "transport")
 
     private var connection: NWConnection?

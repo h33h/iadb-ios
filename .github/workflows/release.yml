@@ -1,32 +1,32 @@
-name: Build & Test
+name: Release
 
 on:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build:
+  release:
     runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup
-        id: setup
         run: |
-          # Select latest Xcode
           XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
-
-          # Install XcodeGen & generate project
           brew install xcodegen
           xcodegen generate
 
-          # Find best simulator
+      - name: Select simulator
+        id: test-setup
+        run: |
           SIM_DEST=$(xcrun simctl list devices available -j | python3 -c "
           import json, sys, re
           data = json.load(sys.stdin)
@@ -40,7 +40,7 @@ jobs:
                   if 'iPhone' in d['name'] and d['isAvailable']:
                       if best is None or ver > best[0]:
                           best = (ver, d['name'], d['udid'])
-          print(f'platform=iOS Simulator,id={best[2]}' if best else 'platform=iOS Simulator,name=iPhone 16')
+          print(f'platform=iOS Simulator,id={best[2]}' if best else 'platform=iOS Simulator')
           ")
           echo "destination=$SIM_DEST" >> "$GITHUB_OUTPUT"
 
@@ -50,14 +50,13 @@ jobs:
           xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
-            -destination '${{ steps.setup.outputs.destination }}' \
+            -destination '${{ steps.test-setup.outputs.destination }}' \
             -skipMacroValidation \
             -skipPackagePluginValidation \
             SWIFT_ENABLE_EXPLICIT_MODULES=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee test.log
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Build Release & Package IPA
         run: |
@@ -75,17 +74,15 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            DEVELOPMENT_TEAM="" \
-            2>&1 | tee build.log
+            DEVELOPMENT_TEAM=""
 
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
           [ -z "$APP_PATH" ] && echo "ERROR: iADB.app not found" && exit 1
           mkdir -p Payload && cp -r "$APP_PATH" Payload/
           zip -r -9 iADB-unsigned.ipa Payload/ && rm -rf Payload
 
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
         with:
-          name: iADB-unsigned
-          path: iADB-unsigned.ipa
-          retention-days: 30
+          files: iADB-unsigned.ipa
+          generate_release_notes: true

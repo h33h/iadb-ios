@@ -1,13 +1,18 @@
 import Foundation
 
+protocol ADBMessageTransport: Sendable {
+    func sendMessage(_ message: ADBMessage) async throws
+    func receiveMessage(timeout: TimeInterval?) async throws -> ADBMessage
+}
+
 /// Represents an open ADB stream for bidirectional communication
 final class ADBStream: @unchecked Sendable {
     let localId: UInt32
     let remoteId: UInt32
-    private let transport: ADBTransportSTLS
+    private let transport: any ADBMessageTransport
     private(set) var isClosed = false
 
-    init(localId: UInt32, remoteId: UInt32, transport: ADBTransportSTLS) {
+    init(localId: UInt32, remoteId: UInt32, transport: any ADBMessageTransport) {
         self.localId = localId
         self.remoteId = remoteId
         self.transport = transport
@@ -29,7 +34,7 @@ final class ADBStream: @unchecked Sendable {
 
     func readMessage() async throws -> ADBMessage {
         guard !isClosed else { throw ADBError.connectionClosed }
-        return try await transport.receiveMessage()
+        return try await transport.receiveMessage(timeout: nil)
     }
 
     func close() async throws {

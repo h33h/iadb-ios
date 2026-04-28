@@ -43,7 +43,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=YES \
             DEVELOPMENT_TEAM="" \
-            2>&1 | tee build.log | xcpretty --color
+            2>&1 | tee build.log
 
           APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
           [ -z "$APP_PATH" ] && echo "ERROR: iADB.app not found" && exit 1

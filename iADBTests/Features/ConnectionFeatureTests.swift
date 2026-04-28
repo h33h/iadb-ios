@@ -20,7 +20,9 @@ struct ConnectionFeatureTests {
         await store.receive(\.startDiscovery) {
             $0.isScanning = true
         }
-        await store.receive(\.devicesUpdated)
+        await store.receive(\.devicesUpdated) {
+            $0.isScanning = false
+        }
     }
 
     @Test
