@@ -115,14 +115,25 @@ struct AppsFeatureTests {
         let store = TestStore(initialState: AppsFeature.State()) {
             AppsFeature()
         } withDependencies: {
-            $0.adbClient.getAppInfo = { _ in "Package: com.test.app\nVersion: 1.0" }
+            $0.adbClient.getAppInfo = { _ in "versionName=1.0\nversionCode=42\ntargetSdk=34\nfirstInstallTime=2024-01-01\nlastUpdateTime=2024-01-02\npkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]" }
         }
 
         await store.send(.getAppDetail(app)) {
             $0.selectedApp = app
         }
         await store.receive(\.appDetailLoaded.success) {
-            $0.appDetailText = "Package: com.test.app\nVersion: 1.0"
+            $0.appDetailText = "versionName=1.0\nversionCode=42\ntargetSdk=34\nfirstInstallTime=2024-01-01\nlastUpdateTime=2024-01-02\npkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]"
+            $0.appDetail = AppDetail(
+                packageName: "com.test.app",
+                versionName: "1.0",
+                versionCode: "42",
+                targetSdk: "34",
+                firstInstallTime: "2024-01-01",
+                lastUpdateTime: "2024-01-02",
+                installerPackage: nil,
+                flags: ["HAS_CODE", "ALLOW_CLEAR_USER_DATA"],
+                rawText: "versionName=1.0\nversionCode=42\ntargetSdk=34\nfirstInstallTime=2024-01-01\nlastUpdateTime=2024-01-02\npkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]"
+            )
             $0.showingAppDetail = true
         }
     }
@@ -146,19 +157,27 @@ struct AppsFeatureTests {
     func toggleSystemApps() async {
         let store = TestStore(initialState: AppsFeature.State()) {
             AppsFeature()
-        } withDependencies: {
-            $0.adbClient.listPackages = { _ in [] }
         }
 
         await store.send(.toggleSystemApps) {
             $0.showSystemApps = true
+            $0.filter = .all
         }
-        await store.receive(\.loadApps) {
-            $0.isLoading = true
-            $0.errorMessage = nil
+    }
+
+    @Test
+    func setFilterAndSort() async {
+        let store = TestStore(initialState: AppsFeature.State()) {
+            AppsFeature()
         }
-        await store.receive(\.appsLoaded.success) {
-            $0.isLoading = false
+
+        await store.send(.setFilter(.system)) {
+            $0.filter = .system
+            $0.showSystemApps = true
+        }
+
+        await store.send(.setSort(.package)) {
+            $0.sort = .package
         }
     }
 
@@ -181,11 +200,25 @@ struct AppsFeatureTests {
             apps: [
                 AppInfo(packageName: "com.google.chrome", isSystemApp: false),
                 AppInfo(packageName: "com.spotify.music", isSystemApp: false),
-                AppInfo(packageName: "com.google.maps", isSystemApp: false)
+                AppInfo(packageName: "com.google.maps", isSystemApp: true)
             ],
+            filter: .all,
             searchText: "google"
         )
         #expect(state.filteredApps.count == 2)
+    }
+
+    @Test
+    func systemFilterOnlyShowsSystemApps() async {
+        let state = AppsFeature.State(
+            apps: [
+                AppInfo(packageName: "com.android.settings", isSystemApp: true),
+                AppInfo(packageName: "com.example.app", isSystemApp: false)
+            ],
+            filter: .system
+        )
+
+        #expect(state.filteredApps.map(\.packageName) == ["com.android.settings"])
     }
 
     @Test

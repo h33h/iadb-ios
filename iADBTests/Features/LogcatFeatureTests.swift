@@ -160,6 +160,53 @@ struct LogcatFeatureTests {
     }
 
     @Test
+    func onAppearLoadsPersistence() async {
+        let preset = LogcatPreset(name: "Errors", filterText: "", level: .error)
+        let store = TestStore(initialState: LogcatFeature.State()) {
+            LogcatFeature()
+        } withDependencies: {
+            $0.logcatPersistenceClient.load = {
+                LogcatPersistenceState(filterText: "ActivityManager", selectedLevel: .warning, presets: [preset])
+            }
+        }
+
+        await store.send(.onAppear)
+        await store.receive(\.loadPersistence) {
+            $0.didLoadPersistence = true
+        }
+        await store.receive(\.persistenceLoaded) {
+            $0.filterText = "ActivityManager"
+            $0.selectedLevel = .warning
+            $0.savedPresets = [preset]
+        }
+    }
+
+    @Test
+    func saveApplyAndDeletePreset() async {
+        let store = TestStore(initialState: LogcatFeature.State(filterText: "Window", selectedLevel: .error, presetNameInput: "Errors")) {
+            LogcatFeature()
+        } withDependencies: {
+            $0.logcatPersistenceClient.save = { _ in }
+        }
+
+        await store.send(.savePreset) {
+            $0.savedPresets = [LogcatPreset(name: "Errors", filterText: "Window", level: .error)]
+            $0.presetNameInput = ""
+        }
+
+        let preset = try #require(store.state.savedPresets.first)
+
+        await store.send(.applyPreset(LogcatPreset(name: "All Warnings", filterText: "Activity", level: .warning))) {
+            $0.filterText = "Activity"
+            $0.selectedLevel = .warning
+        }
+
+        await store.send(.deletePreset(preset.id)) {
+            $0.savedPresets = []
+        }
+    }
+
+    @Test
     func logcatStopped() async {
         let store = TestStore(
             initialState: LogcatFeature.State(isRunning: true)

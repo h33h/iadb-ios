@@ -22,6 +22,50 @@ struct AppInfo: Identifiable, Hashable {
     }
 }
 
+struct AppDetail: Equatable {
+    var packageName: String
+    var versionName: String?
+    var versionCode: String?
+    var targetSdk: String?
+    var firstInstallTime: String?
+    var lastUpdateTime: String?
+    var installerPackage: String?
+    var flags: [String]
+    var rawText: String
+
+    static func parse(packageName: String, rawText: String) -> AppDetail {
+        AppDetail(
+            packageName: packageName,
+            versionName: match("versionName=([^\\s]+)", in: rawText),
+            versionCode: match("versionCode=([^\\s]+)", in: rawText),
+            targetSdk: match("targetSdk=([^\\s]+)", in: rawText),
+            firstInstallTime: match("firstInstallTime=([^\\n]+)", in: rawText),
+            lastUpdateTime: match("lastUpdateTime=([^\\n]+)", in: rawText),
+            installerPackage: match("installerPackageName=([^\\s]+)", in: rawText),
+            flags: flags(in: rawText),
+            rawText: rawText
+        )
+    }
+
+    private static func match(_ pattern: String, in text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1,
+              let valueRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[valueRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func flags(in text: String) -> [String] {
+        guard let value = match("pkgFlags=\\[([^\\]]+)\\]", in: text) else { return [] }
+        return value
+            .split(separator: " ")
+            .map(String.init)
+            .filter { !$0.isEmpty }
+    }
+}
+
 /// Represents a logcat log entry
 struct LogEntry: Identifiable, Equatable {
     let id = UUID()
@@ -32,7 +76,7 @@ struct LogEntry: Identifiable, Equatable {
     let tag: String
     let message: String
 
-    enum LogLevel: String {
+    enum LogLevel: String, Codable {
         case verbose = "V"
         case debug = "D"
         case info = "I"
@@ -86,10 +130,18 @@ struct LogEntry: Identifiable, Equatable {
 }
 
 /// Shell command history entry
-struct ShellHistoryEntry: Identifiable, Equatable {
-    let id = UUID()
+struct ShellHistoryEntry: Identifiable, Equatable, Codable {
+    let id: UUID
     let command: String
     let output: String
     let timestamp: Date
     let isError: Bool
+
+    init(id: UUID = UUID(), command: String, output: String, timestamp: Date, isError: Bool) {
+        self.id = id
+        self.command = command
+        self.output = output
+        self.timestamp = timestamp
+        self.isError = isError
+    }
 }

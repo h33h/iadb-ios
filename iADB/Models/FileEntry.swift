@@ -44,6 +44,15 @@ struct FileEntry: Identifiable, Hashable {
         }
     }
 
+    var isPreviewable: Bool {
+        guard !isDirectory else { return false }
+        let ext = (name as NSString).pathExtension.lowercased()
+        return [
+            "txt", "log", "json", "xml", "yaml", "yml", "plist", "md", "csv", "ini", "conf", "cfg",
+            "jpg", "jpeg", "png", "gif", "bmp", "webp"
+        ].contains(ext)
+    }
+
     /// Parse `ls -la` output line into a FileEntry
     static func parse(line: String, parentPath: String) -> FileEntry? {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)

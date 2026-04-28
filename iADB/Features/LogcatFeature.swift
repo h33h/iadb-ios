@@ -9,6 +9,10 @@ struct LogcatFeature {
         var isRunning = false
         var filterText = ""
         var selectedLevel: LogEntry.LogLevel?
+        var savedPresets: [LogcatPreset] = []
+        var didLoadPersistence = false
+        var presetNameInput = ""
+        var exportText: String?
         var autoScroll = true
         var maxEntries = 5000
         var isPaused = false
@@ -31,23 +35,48 @@ struct LogcatFeature {
 
     enum Action: BindableAction {
         case binding(BindingAction<State>)
+        case onAppear
         case startLogcat
         case stopLogcat
         case logcatLines([String])
         case logcatStopped
         case clearLog
         case togglePause
+        case loadPersistence
+        case persistenceLoaded(LogcatPersistenceState)
+        case savePreset
+        case applyPreset(LogcatPreset)
+        case deletePreset(UUID)
+        case clearExport
     }
 
     private enum CancelID { case logcat }
 
     @Dependency(\.adbClient) var adbClient
+    @Dependency(\.logcatPersistenceClient) var logcatPersistenceClient
 
     var body: some ReducerOf<Self> {
         BindingReducer()
         Reduce { state, action in
             switch action {
+            case .onAppear:
+                guard !state.didLoadPersistence else { return .none }
+                return .send(.loadPersistence)
+
             case .binding:
+                persist(state)
+                return .none
+
+            case .loadPersistence:
+                state.didLoadPersistence = true
+                return .run { send in
+                    await send(.persistenceLoaded(logcatPersistenceClient.load()))
+                }
+
+            case .persistenceLoaded(let persisted):
+                state.filterText = persisted.filterText
+                state.selectedLevel = persisted.selectedLevel
+                state.savedPresets = persisted.presets
                 return .none
 
             case .startLogcat:
@@ -122,7 +151,42 @@ struct LogcatFeature {
                     }
                 }
                 return .none
+
+            case .savePreset:
+                let trimmedName = state.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                let filterText = state.filterText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmedName.isEmpty else { return .none }
+                let preset = LogcatPreset(name: trimmedName, filterText: filterText, level: state.selectedLevel)
+                state.savedPresets.insert(preset, at: 0)
+                state.presetNameInput = ""
+                persist(state)
+                return .none
+
+            case .applyPreset(let preset):
+                state.filterText = preset.filterText
+                state.selectedLevel = preset.level
+                persist(state)
+                return .none
+
+            case .deletePreset(let id):
+                state.savedPresets.removeAll { $0.id == id }
+                persist(state)
+                return .none
+
+            case .clearExport:
+                state.exportText = nil
+                return .none
             }
         }
+    }
+
+    private func persist(_ state: State) {
+        logcatPersistenceClient.save(
+            LogcatPersistenceState(
+                filterText: state.filterText,
+                selectedLevel: state.selectedLevel,
+                presets: state.savedPresets
+            )
+        )
     }
 }

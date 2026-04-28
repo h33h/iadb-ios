@@ -34,6 +34,7 @@ struct ConnectionFeatureTests {
 
         await store.send(.connectToDevice(device)) {
             $0.connectionState = .connecting
+            $0.lastConnectionDevice = device
         }
         await store.receive(\.connectionResult.success) {
             $0.connectionState = .connected
@@ -51,9 +52,11 @@ struct ConnectionFeatureTests {
 
         await store.send(.connectToDevice(device)) {
             $0.connectionState = .connecting
+            $0.lastConnectionDevice = device
         }
         await store.receive(\.connectionResult.failure) {
             $0.connectionState = .error("Connection failed: timeout")
+            $0.lastConnectionError = "Connection failed: timeout"
         }
     }
 
@@ -96,7 +99,8 @@ struct ConnectionFeatureTests {
             $0.pairing = PairingFeature.State(
                 hostInput: "10.0.0.5",
                 portInput: "37000",
-                isPrefilled: true
+                isPrefilled: true,
+                serviceName: "test"
             )
         }
     }
@@ -110,8 +114,60 @@ struct ConnectionFeatureTests {
 
         await store.send(.showPairingForDevice(device)) {
             $0.pairing = PairingFeature.State(
-                hostInput: "10.0.0.5"
+                hostInput: "10.0.0.5",
+                serviceName: "test"
             )
+        }
+    }
+
+    @Test
+    func reconnectLastDevice() async {
+        let device = DiscoveredDevice(id: "test", name: "Pixel", host: "10.0.0.1", port: 38745, isPaired: true)
+        let store = TestStore(
+            initialState: ConnectionFeature.State(lastConnectionDevice: device)
+        ) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.adbClient.connect = { _, _ in "device::Pixel" }
+        }
+
+        await store.send(.reconnectLastDevice)
+        await store.receive(\.connectToDevice) {
+            $0.connectionState = .connecting
+            $0.lastConnectionDevice = device
+        }
+        await store.receive(\.connectionResult.success) {
+            $0.connectionState = .connected
+        }
+    }
+
+    @Test
+    func rescanClearsVisibleDevicesAndRestartsDiscovery() async {
+        let store = TestStore(
+            initialState: ConnectionFeature.State(
+                discoveredDevices: [DiscoveredDevice(id: "test", name: "Pixel", host: "10.0.0.1", port: 38745, isPaired: true)],
+                lastConnectionError: "Connection failed"
+            )
+        ) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.deviceDiscoveryClient.start = { _ in
+                AsyncStream { continuation in
+                    continuation.yield([])
+                    continuation.finish()
+                }
+            }
+        }
+
+        await store.send(.rescan) {
+            $0.discoveredDevices = []
+            $0.lastConnectionError = nil
+        }
+        await store.receive(\.startDiscovery) {
+            $0.isScanning = true
+        }
+        await store.receive(\.devicesUpdated) {
+            $0.isScanning = false
         }
     }
 

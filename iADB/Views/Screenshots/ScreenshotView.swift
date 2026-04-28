@@ -1,13 +1,29 @@
 import SwiftUI
+import UIKit
 import ComposableArchitecture
 
 struct ScreenshotView: View {
     let store: StoreOf<ScreenshotFeature>
     @State private var showingFullScreen = false
+    @State private var shareImage: UIImage?
+    @State private var shareFileName = "screenshot.png"
+    @State private var showingShareSheet = false
 
     var body: some View {
         NavigationStack {
-            VStack {
+            VStack(spacing: 12) {
+                if store.isCapturing {
+                    StatusBannerView(style: .progress, message: "Capturing screenshot...", showsProgress: true)
+                        .padding(.horizontal)
+                        .padding(.top, 8)
+                }
+
+                if let error = store.errorMessage {
+                    StatusBannerView(style: .error, message: error)
+                        .padding(.horizontal)
+                        .padding(.top, store.isCapturing ? 0 : 8)
+                }
+
                 if store.screenshots.isEmpty && !store.isCapturing {
                     VStack(spacing: 16) {
                         Spacer()
@@ -39,6 +55,11 @@ struct ScreenshotView: View {
                                 }
                                 .contextMenu {
                                     Button {
+                                        share(screenshot)
+                                    } label: {
+                                        Label("Share", systemImage: "square.and.arrow.up")
+                                    }
+                                    Button {
                                         UIImageWriteToSavedPhotosAlbum(UIImage(data: screenshot.data) ?? UIImage(), nil, nil, nil)
                                     } label: {
                                         Label("Save to Photos", systemImage: "square.and.arrow.down")
@@ -59,20 +80,12 @@ struct ScreenshotView: View {
                         .padding()
                     }
                 }
-
-                if let error = store.errorMessage {
-                    HStack {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundColor(.red)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.red)
-                    }
-                    .padding(.horizontal)
-                }
             }
             .navigationTitle("Screenshots")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                store.send(.onAppear)
+            }
             .toolbar {
                 ToolbarItemGroup(placement: .primaryAction) {
                     if store.isCapturing {
@@ -94,14 +107,30 @@ struct ScreenshotView: View {
                     }
                 }
             }
-            .fullScreenCover(isPresented: $showingFullScreen) {
+            .fullScreenCover(isPresented: $showingFullScreen, onDismiss: {
+                store.send(.selectScreenshot(nil))
+            }) {
                 if let screenshot = store.selectedScreenshot {
                     FullScreenScreenshot(entry: screenshot) {
                         showingFullScreen = false
+                    } onShare: {
+                        share(screenshot)
                     }
                 }
             }
+            .sheet(isPresented: $showingShareSheet) {
+                if let shareImage {
+                    ShareImageSheet(image: shareImage, fileName: shareFileName)
+                }
+            }
         }
+    }
+
+    private func share(_ screenshot: ScreenshotFeature.ScreenshotEntry) {
+        guard let image = UIImage(data: screenshot.data) else { return }
+        shareImage = image
+        shareFileName = "screenshot-\(Int(screenshot.timestamp.timeIntervalSince1970)).png"
+        showingShareSheet = true
     }
 }
 
@@ -130,7 +159,12 @@ struct ScreenshotThumbnail: View {
 struct FullScreenScreenshot: View {
     let entry: ScreenshotFeature.ScreenshotEntry
     let onDismiss: () -> Void
+    let onShare: () -> Void
     @State private var scale: CGFloat = 1.0
+    @State private var lastScale: CGFloat = 1.0
+
+    private static let minScale: CGFloat = 1.0
+    private static let maxScale: CGFloat = 6.0
 
     var body: some View {
         ZStack(alignment: .topTrailing) {
@@ -143,14 +177,31 @@ struct FullScreenScreenshot: View {
                 .gesture(
                     MagnificationGesture()
                         .onChanged { value in
-                            scale = value
+                            let proposed = lastScale * value
+                            scale = min(max(proposed, Self.minScale), Self.maxScale)
                         }
                         .onEnded { _ in
-                            withAnimation { scale = 1.0 }
+                            lastScale = scale
                         }
                 )
+                .onTapGesture(count: 2) {
+                    withAnimation {
+                        if scale > Self.minScale {
+                            scale = Self.minScale
+                        } else {
+                            scale = 2.5
+                        }
+                        lastScale = scale
+                    }
+                }
 
             HStack(spacing: 16) {
+                Button(action: onShare) {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.title3)
+                        .foregroundColor(.white)
+                }
+
                 Button {
                     UIImageWriteToSavedPhotosAlbum(UIImage(data: entry.data) ?? UIImage(), nil, nil, nil)
                 } label: {
@@ -176,4 +227,19 @@ struct FullScreenScreenshot: View {
             .padding()
         }
     }
+}
+
+struct ShareImageSheet: UIViewControllerRepresentable {
+    let image: UIImage
+    let fileName: String
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(fileName)
+        if let data = image.pngData() {
+            try? data.write(to: url, options: .atomic)
+        }
+        return UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
