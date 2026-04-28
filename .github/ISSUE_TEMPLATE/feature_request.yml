@@ -1,0 +1,34 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem are you trying to solve?
+      placeholder: Describe the friction or missing capability
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Describe the change you want to see
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: Any workarounds or alternative approaches?
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Extra context
+      placeholder: Screenshots, examples, or implementation notes
