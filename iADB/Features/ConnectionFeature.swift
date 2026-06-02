@@ -2,6 +2,135 @@ import Foundation
 import ComposableArchitecture
 import os
 
+#if DEBUG
+struct DebugSettings: Equatable, Codable, Sendable {
+    var useAndroidEmulator = false
+    var emulatorHost = "127.0.0.1"
+    var emulatorPortInput = "5555"
+
+    static let defaultValue = Self()
+
+    var emulatorPort: UInt16 {
+        let rawPort = emulatorPortInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let port = UInt16(rawPort), port > 0 else {
+            return Self.defaultValue.emulatorPort
+        }
+        return port
+    }
+
+    var emulatorDevice: DiscoveredDevice {
+        let settings = sanitized()
+        return DiscoveredDevice(
+            id: "debug-android-emulator",
+            name: "Android Emulator",
+            host: settings.emulatorHost,
+            port: settings.emulatorPort,
+            isPaired: true
+        )
+    }
+
+    static func resolved(
+        stored: Self,
+        arguments: [String] = ProcessInfo.processInfo.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Self {
+        var settings = stored
+        if arguments.contains("--iadb-debug-android-emulator") {
+            settings.useAndroidEmulator = true
+        }
+        if let host = environment["IADB_DEBUG_ANDROID_HOST"] {
+            settings.emulatorHost = host
+        }
+        if let port = environment["IADB_DEBUG_ANDROID_PORT"] {
+            settings.emulatorPortInput = port
+        }
+        return settings.sanitized()
+    }
+
+    func sanitized() -> Self {
+        var copy = self
+        let host = emulatorHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        copy.emulatorHost = host.isEmpty ? Self.defaultValue.emulatorHost : host
+        copy.emulatorPortInput = String(emulatorPort)
+        return copy
+    }
+}
+
+struct DebugSettingsClient: Sendable {
+    var load: @Sendable () -> DebugSettings
+    var save: @Sendable (DebugSettings) -> Void
+}
+
+extension DebugSettingsClient: DependencyKey {
+    private static let key = "debugSettings"
+
+    static var liveValue: Self {
+        Self(
+            load: {
+                guard let data = UserDefaults.standard.data(forKey: key),
+                      let settings = try? JSONDecoder().decode(DebugSettings.self, from: data) else {
+                    return DebugSettings.resolved(stored: .defaultValue)
+                }
+                return DebugSettings.resolved(stored: settings)
+            },
+            save: { settings in
+                guard let data = try? JSONEncoder().encode(settings.sanitized()) else { return }
+                UserDefaults.standard.set(data, forKey: key)
+            }
+        )
+    }
+
+    static var testValue: Self {
+        Self(
+            load: { .defaultValue },
+            save: { _ in }
+        )
+    }
+}
+
+struct DebugEmulatorClient: Sendable {
+    var isAvailable: @Sendable (_ host: String, _ port: UInt16) async -> Bool
+}
+
+extension DebugEmulatorClient: DependencyKey {
+    static var liveValue: Self {
+        Self(
+            isAvailable: { host, port in
+                let transport = ADBTransport()
+                defer { transport.disconnect() }
+
+                do {
+                    try await transport.connect(host: host, port: port, timeout: 2)
+                    try await transport.sendMessage(ADBMessage.connectMessage())
+                    let response = try await transport.receiveMessage(timeout: 2)
+                    return response.commandType == .connect
+                        || response.commandType == .auth
+                        || response.commandType == .stls
+                } catch {
+                    return false
+                }
+            }
+        )
+    }
+
+    static var testValue: Self {
+        Self(isAvailable: { _, _ in false })
+    }
+}
+
+extension DependencyValues {
+    var debugSettingsClient: DebugSettingsClient {
+        get { self[DebugSettingsClient.self] }
+        set { self[DebugSettingsClient.self] = newValue }
+    }
+
+    var debugEmulatorClient: DebugEmulatorClient {
+        get { self[DebugEmulatorClient.self] }
+        set { self[DebugEmulatorClient.self] = newValue }
+    }
+}
+#endif
+
 @Reducer
 struct ConnectionFeature {
     @ObservableState
@@ -13,6 +142,10 @@ struct ConnectionFeature {
         var lastConnectionDevice: DiscoveredDevice?
         var lastConnectionError: String?
         @Presents var pairing: PairingFeature.State?
+        #if DEBUG
+        var debugSettings: DebugSettings = .defaultValue
+        var debugSettingsPresented = false
+        #endif
     }
 
     enum Action: BindableAction {
@@ -30,6 +163,11 @@ struct ConnectionFeature {
         case showPairingForDevice(DiscoveredDevice)
         case removePairedDevice(serviceName: String)
         case pairing(PresentationAction<PairingFeature.Action>)
+        #if DEBUG
+        case showDebugSettings
+        case hideDebugSettings
+        case debugSettingsChanged
+        #endif
     }
 
     private enum CancelID { case connection, discovery }
@@ -37,20 +175,41 @@ struct ConnectionFeature {
     @Dependency(\.adbClient) var adbClient
     @Dependency(\.pairedDevicesClient) var pairedDevicesClient
     @Dependency(\.deviceDiscoveryClient) var deviceDiscoveryClient
+    #if DEBUG
+    @Dependency(\.debugSettingsClient) var debugSettingsClient
+    @Dependency(\.debugEmulatorClient) var debugEmulatorClient
+    #endif
 
     var body: some ReducerOf<Self> {
         BindingReducer()
         Reduce { state, action in
             switch action {
             case .binding:
+                #if DEBUG
+                return .send(.debugSettingsChanged)
+                #else
                 return .none
+                #endif
 
             case .onAppear:
                 state.pairedDevices = pairedDevicesClient.load()
+                #if DEBUG
+                state.debugSettings = debugSettingsClient.load()
+                #endif
                 return .send(.startDiscovery)
 
             case .startDiscovery:
                 state.isScanning = true
+                #if DEBUG
+                if state.debugSettings.useAndroidEmulator {
+                    let settings = state.debugSettings.sanitized()
+                    return .run { send in
+                        let isAvailable = await debugEmulatorClient.isAvailable(settings.emulatorHost, settings.emulatorPort)
+                        await send(.devicesUpdated(isAvailable ? [settings.emulatorDevice] : []))
+                    }
+                    .cancellable(id: CancelID.discovery, cancelInFlight: true)
+                }
+                #endif
                 let pairedKeys = state.pairedDevices.map(\.publicKey)
                 return .run { send in
                     let stream = deviceDiscoveryClient.start(pairedKeys)
@@ -58,7 +217,7 @@ struct ConnectionFeature {
                         await send(.devicesUpdated(devices))
                     }
                 }
-                .cancellable(id: CancelID.discovery)
+                .cancellable(id: CancelID.discovery, cancelInFlight: true)
 
             case .rescan:
                 state.discoveredDevices = []
@@ -145,6 +304,26 @@ struct ConnectionFeature {
                 return .run { [devices = state.pairedDevices] _ in
                     pairedDevicesClient.save(devices)
                 }
+
+            #if DEBUG
+            case .showDebugSettings:
+                state.debugSettingsPresented = true
+                return .none
+
+            case .hideDebugSettings:
+                guard state.debugSettingsPresented else { return .none }
+                state.debugSettingsPresented = false
+                return .none
+
+            case .debugSettingsChanged:
+                state.discoveredDevices = []
+                state.lastConnectionError = nil
+                let settings = state.debugSettings.sanitized()
+                return .merge(
+                    .run { _ in debugSettingsClient.save(settings) },
+                    .send(.startDiscovery)
+                )
+            #endif
 
             case .pairing(.presented(.pairingCompleted(let name, let publicKey))):
                 guard let pairingState = state.pairing else { return .none }

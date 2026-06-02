@@ -105,8 +105,12 @@ struct ADBMessage {
     /// После TLS (ADB v0x01000001) устройство может слать dataCRC32=0
     func isValid(skipChecksum: Bool) -> Bool {
         guard command ^ magic == 0xFFFFFFFF else { return false }
-        if skipChecksum { return true }
+        if skipChecksum || isModernConnectWithZeroChecksum { return true }
         return dataCRC32 == ADBMessage.checksum(data)
+    }
+
+    private var isModernConnectWithZeroChecksum: Bool {
+        commandType == .connect && arg0 >= ADBMessage.version && dataCRC32 == 0
     }
 
     var commandType: ADBCommand? {

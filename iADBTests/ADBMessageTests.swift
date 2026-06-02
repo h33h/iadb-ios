@@ -121,6 +121,21 @@ final class ADBMessageTests: XCTestCase {
         XCTAssertFalse(msg.isValid)
     }
 
+    func testModernConnectMessageAllowsZeroChecksum() {
+        let payload = Data("device::ro.product.name=sdk_phone64_arm64\0".utf8)
+        let msg = ADBMessage(
+            command: ADBCommand.connect.rawValue,
+            arg0: ADBMessage.version,
+            arg1: ADBMessage.maxPayload,
+            dataLength: UInt32(payload.count),
+            dataCRC32: 0,
+            magic: ADBCommand.connect.magic,
+            data: payload
+        )
+
+        XCTAssertTrue(msg.isValid)
+    }
+
     // MARK: - Serialization
 
     func testHeaderBytesSize() {

@@ -155,12 +155,101 @@ struct ConnectionView: View {
             }
             .navigationTitle("iADB")
             .onAppear { store.send(.onAppear) }
+            #if DEBUG
+            .sheet(
+                isPresented: Binding(
+                    get: { store.debugSettingsPresented },
+                    set: { isPresented in
+                        if isPresented {
+                            store.send(.showDebugSettings)
+                        } else {
+                            store.send(.hideDebugSettings)
+                        }
+                    }
+                )
+            ) {
+                DebugSettingsSheet(store: store)
+            }
+            #endif
             .sheet(item: $store.scope(state: \.pairing, action: \.pairing)) { pairingStore in
                 PairingView(store: pairingStore)
             }
         }
+        #if DEBUG
+        .gesture(debugSettingsLongPressGesture, including: .all)
+        #endif
+    }
+}
+
+#if DEBUG
+private extension ConnectionView {
+    var debugSettingsLongPressGesture: some Gesture {
+        LongPressGesture(minimumDuration: 2, maximumDistance: 50)
+            .sequenced(before: DragGesture(minimumDistance: 0))
+            .onChanged { value in
+                guard case .second(true, _) = value,
+                      !store.debugSettingsPresented
+                else { return }
+                store.send(.showDebugSettings)
+            }
+    }
+}
+
+private struct DebugSettingsSheet: View {
+    @Bindable var store: StoreOf<ConnectionFeature>
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Toggle("Use Android Emulator", isOn: $store.debugSettings.useAndroidEmulator)
+
+                    LabeledContent("Host") {
+                        TextField("127.0.0.1", text: $store.debugSettings.emulatorHost)
+                            .multilineTextAlignment(.trailing)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .foregroundStyle(debugFieldForegroundStyle)
+                    }
+                    .disabled(!store.debugSettings.useAndroidEmulator)
+                    .foregroundStyle(debugFieldForegroundStyle)
+                    .opacity(debugFieldOpacity)
+
+                    LabeledContent("Port") {
+                        TextField("5555", text: $store.debugSettings.emulatorPortInput)
+                            .multilineTextAlignment(.trailing)
+                            .keyboardType(.numberPad)
+                            .foregroundStyle(debugFieldForegroundStyle)
+                    }
+                    .disabled(!store.debugSettings.useAndroidEmulator)
+                    .foregroundStyle(debugFieldForegroundStyle)
+                    .opacity(debugFieldOpacity)
+                } footer: {
+                    Text("Uses real ADB after injecting a local emulator into discovery.")
+                }
+            }
+            .navigationTitle("Debug")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") {
+                        store.send(.hideDebugSettings)
+                    }
+                }
+            }
+        }
     }
 
+    private var debugFieldForegroundStyle: Color {
+        store.debugSettings.useAndroidEmulator ? .primary : .secondary
+    }
+
+    private var debugFieldOpacity: Double {
+        store.debugSettings.useAndroidEmulator ? 1 : 0.45
+    }
+}
+#endif
+
+extension ConnectionView {
     @ViewBuilder
     private var statusIcon: some View {
         switch store.connectionState {

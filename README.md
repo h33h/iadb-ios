@@ -79,6 +79,19 @@ xcodebuild test \
   -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
+## Debug Android Emulator Mode
+
+Debug builds include a hidden connection-screen debug modal for production-like checks against a local Android Emulator. Long press the connection screen to open it.
+
+Use the `iADB Android Emulator` scheme or enable `Use Android Emulator` in the debug modal. When the configured ADB endpoint is reachable, the modal injects a synthetic discovered device. `ADBClient` stays live, so connect, shell, files, apps, logcat, and screenshots still use the real ADB protocol.
+
+Defaults:
+
+- Host: `127.0.0.1`
+- Port: `5555`
+- Launch argument: `--iadb-debug-android-emulator`
+- Environment overrides: `IADB_DEBUG_ANDROID_HOST`, `IADB_DEBUG_ANDROID_PORT`
+
 ## How To Connect
 
 1. Enable Developer Options on the Android device.

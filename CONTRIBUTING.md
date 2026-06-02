@@ -33,6 +33,12 @@ xcodebuild test \
   -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
+## Android Emulator Debug Checks
+
+For production-like manual checks from the iOS Simulator, use the `iADB Android Emulator` scheme after running `xcodegen generate`.
+
+Debug builds expose a hidden connection-screen debug modal on long press. Enable `Use Android Emulator`, set host/port, close the modal, and connect through the live ADB client after the configured ADB endpoint is reachable.
+
 ## Pull Request Notes
 
 - Link the issue when applicable.

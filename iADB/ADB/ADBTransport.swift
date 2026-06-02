@@ -191,6 +191,10 @@ final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
             throw ADBError.protocolError("Message validation failed")
         }
 
+        if message.commandType == .connect && message.arg0 >= ADBMessage.version {
+            skipChecksum = true
+        }
+
         return message
     }
 

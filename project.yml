@@ -123,3 +123,19 @@ schemes:
         - iADBTests
     archive:
       config: Release
+  iADB Android Emulator:
+    build:
+      targets:
+        iADB: all
+        iADBTests: [test]
+    run:
+      config: Debug
+      commandLineArguments:
+        "--iadb-debug-android-emulator": true
+      environmentVariables:
+        IADB_DEBUG_ANDROID_HOST: "127.0.0.1"
+        IADB_DEBUG_ANDROID_PORT: "5555"
+    test:
+      config: Debug
+      targets:
+        - iADBTests
