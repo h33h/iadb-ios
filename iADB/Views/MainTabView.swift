@@ -1,5 +1,6 @@
 import SwiftUI
 import ComposableArchitecture
+import UIKit
 
 /// Root tab view — composes all feature stores
 struct MainTabView: View {
@@ -49,8 +50,10 @@ struct MainTabView: View {
                 }
                 .tag(AppFeature.Tab.screenshot)
         }
+        .allowsHitTesting(!isShowingDisconnectedOverlay)
+        .accessibilityHidden(isShowingDisconnectedOverlay)
         .overlay {
-            if !store.connection.connectionState.isConnected && store.selectedTab != .connection {
+            if isShowingDisconnectedOverlay {
                 DisconnectedOverlay(
                     lastDevice: store.connection.lastConnectionDevice,
                     errorMessage: store.connection.lastConnectionError,
@@ -63,6 +66,10 @@ struct MainTabView: View {
                 )
             }
         }
+    }
+
+    private var isShowingDisconnectedOverlay: Bool {
+        !store.connection.connectionState.isConnected && store.selectedTab != .connection
     }
 }
 
@@ -103,25 +110,30 @@ struct DisconnectedOverlay: View {
                     onReconnect()
                 }
                 .buttonStyle(.borderedProminent)
+                .frame(minHeight: 44)
             }
             if onReconnect == nil {
                 Button("Go to Connect") {
                     onConnect()
                 }
                 .buttonStyle(.borderedProminent)
+                .frame(minHeight: 44)
             } else {
                 Button("Go to Connect") {
                     onConnect()
                 }
                 .buttonStyle(.bordered)
+                .frame(minHeight: 44)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.ultraThinMaterial)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 }
 
-enum StatusBannerStyle {
+enum StatusBannerStyle: Equatable {
     case info
     case success
     case warning
@@ -182,8 +194,11 @@ struct StatusBannerView: View {
                     Button(action: onDismiss) {
                         Image(systemName: "xmark.circle.fill")
                             .foregroundColor(.secondary)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss")
                 }
             }
 
@@ -191,6 +206,7 @@ struct StatusBannerView: View {
                 Button(actionTitle, action: onAction)
                     .font(.caption.weight(.semibold))
                     .buttonStyle(.bordered)
+                    .frame(minHeight: 44)
             }
         }
         .padding(.horizontal)
@@ -198,5 +214,17 @@ struct StatusBannerView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(style.background)
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .accessibilityElement(children: .contain)
+        .onAppear {
+            announceErrorIfNeeded(message)
+        }
+        .onChange(of: message) { _, newMessage in
+            announceErrorIfNeeded(newMessage)
+        }
+    }
+
+    private func announceErrorIfNeeded(_ message: String) {
+        guard style == .error else { return }
+        UIAccessibility.post(notification: .announcement, argument: message)
     }
 }

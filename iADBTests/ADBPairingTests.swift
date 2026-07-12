@@ -3,6 +3,24 @@ import XCTest
 @testable import iADB
 
 final class ADBPairingTests: XCTestCase {
+    func testDevicePeerInfoParsesGUID() throws {
+        var data = Data(count: 8192)
+        data[0] = 1
+        let guid = "adb-device-guid-123"
+        data.replaceSubrange(1..<(1 + guid.utf8.count), with: guid.utf8)
+
+        let peer = try ADBPairing.parsePeerInfo(data)
+
+        XCTAssertEqual(peer.guid, guid)
+        XCTAssertEqual(peer.name, "Android Device")
+    }
+
+    func testDevicePeerInfoRejectsRSAKeyAndInvalidLength() {
+        var wrongType = Data(count: 8192)
+        wrongType[0] = 0
+        XCTAssertThrowsError(try ADBPairing.parsePeerInfo(wrongType))
+        XCTAssertThrowsError(try ADBPairing.parsePeerInfo(Data(count: 10)))
+    }
 
     // MARK: - QR Code Parsing
 
@@ -45,6 +63,15 @@ final class ADBPairingTests: XCTestCase {
     }
 
     // MARK: - Pairing Validation
+
+    func testPairingCodeNormalizesLocalizedDecimalDigits() throws {
+        XCTAssertEqual(try ADBPairing.normalizedPairingCode("١٢٣٤٥٦"), "123456")
+        XCTAssertEqual(try ADBPairing.normalizedPairingCode("１２３４５６"), "123456")
+    }
+
+    func testPairingCodeRejectsNonDecimalNumerals() {
+        XCTAssertThrowsError(try ADBPairing.normalizedPairingCode("ⅠⅡⅢⅣⅤⅥ"))
+    }
 
     func testPairInvalidCodeTooShort() async {
         do {

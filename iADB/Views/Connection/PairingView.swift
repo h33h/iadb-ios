@@ -75,6 +75,12 @@ struct PairingView: View {
                         store.pairingCode.count != 6 ||
                         store.pairingState.isPairing
                     )
+
+                    if store.pairingState.isPairing {
+                        Button("Cancel Pairing", role: .cancel) {
+                            store.send(.cancelPairing)
+                        }
+                    }
                 }
 
                 // Status
@@ -109,9 +115,15 @@ struct PairingView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar(content: {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") {
+                        store.send(.cancelPairing)
+                        dismiss()
+                    }
                 }
             })
+            .onDisappear {
+                store.send(.cancelPairing)
+            }
         }
     }
 }

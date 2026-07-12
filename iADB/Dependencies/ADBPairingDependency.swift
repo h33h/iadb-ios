@@ -18,7 +18,7 @@ extension ADBPairingDependency: DependencyKey {
     static var previewValue: Self {
         Self(
             pair: { _, _, _ in
-                ADBPairing.PeerInfo(name: "Preview Device", guid: "", publicKey: Data())
+                ADBPairing.PeerInfo(name: "Preview Device", guid: "preview-device-guid")
             }
         )
     }

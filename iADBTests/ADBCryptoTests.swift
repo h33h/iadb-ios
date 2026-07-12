@@ -1,4 +1,5 @@
 import Foundation
+import Security
 import XCTest
 @testable import iADB
 
@@ -66,6 +67,29 @@ final class ADBCryptoTests: XCTestCase {
         let signature = try crypto.sign(token: token)
         XCTAssertFalse(signature.isEmpty)
         XCTAssertEqual(signature.count, 256) // RSA-2048 signature = 256 bytes
+
+        var digestError: Unmanaged<CFError>?
+        XCTAssertTrue(SecKeyVerifySignature(
+            crypto.publicKey,
+            .rsaSignatureDigestPKCS1v15SHA1,
+            token as CFData,
+            signature as CFData,
+            &digestError
+        ))
+
+        var messageError: Unmanaged<CFError>?
+        XCTAssertFalse(SecKeyVerifySignature(
+            crypto.publicKey,
+            .rsaSignatureMessagePKCS1v15SHA1,
+            token as CFData,
+            signature as CFData,
+            &messageError
+        ), "ADB tokens are digests and must not be hashed a second time")
+    }
+
+    func testSignRejectsNonSHA1SizedToken() throws {
+        let crypto = try ADBCrypto()
+        XCTAssertThrowsError(try crypto.sign(token: Data(repeating: 0, count: 19)))
     }
 
     func testSignDifferentTokensProduceDifferentSignatures() throws {

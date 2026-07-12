@@ -36,10 +36,28 @@ struct DeviceInfoView: View {
                         .padding(.top, 8)
                 }
 
+                if store.isRebooting {
+                    StatusBannerView(
+                        style: .progress,
+                        message: "Sending reboot command…",
+                        showsProgress: true
+                    )
+                    .padding(.horizontal)
+                    .padding(.top, store.isLoading ? 0 : 8)
+                } else if let rebootStatus = store.rebootStatusMessage {
+                    StatusBannerView(style: .success, message: rebootStatus)
+                        .padding(.horizontal)
+                        .padding(.top, store.isLoading ? 0 : 8)
+                }
+
                 if let error = store.errorMessage {
-                    StatusBannerView(style: .error, message: error, actionTitle: "Retry", onAction: {
-                        store.send(.fetchDeviceInfo)
-                    })
+                    StatusBannerView(
+                        style: .error,
+                        message: error,
+                        actionTitle: errorRecoveryTitle,
+                        onDismiss: { store.send(.dismissError) },
+                        onAction: errorRecoveryTitle == nil ? nil : { store.send(.retryError) }
+                    )
                     .padding(.horizontal)
                     .padding(.top, store.isLoading ? 0 : 8)
                 }
@@ -88,6 +106,7 @@ struct DeviceInfoView: View {
                         } label: {
                             Label("Reboot Device", systemImage: "arrow.clockwise.circle")
                         }
+                        .disabled(store.isRebooting)
                     }
                 }
             }
@@ -121,6 +140,7 @@ struct DeviceInfoView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .disabled(store.isLoading || store.isRebooting)
                 }
             }
             .confirmationDialog("Reboot Mode", isPresented: $showingRebootMenu) {
@@ -138,6 +158,14 @@ struct DeviceInfoView: View {
             .sheet(isPresented: $showingExportSheet) {
                 ShareTextSheet(text: store.details.snapshotText, fileName: "device-snapshot.txt")
             }
+        }
+    }
+
+    private var errorRecoveryTitle: String? {
+        switch store.errorRecovery {
+        case .fetch: "Retry Refresh"
+        case .reboot: "Retry Reboot"
+        case nil: nil
         }
     }
 }

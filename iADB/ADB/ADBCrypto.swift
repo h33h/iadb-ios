@@ -9,6 +9,11 @@ final class ADBCrypto {
     private static let keySizeInBits = 2048
     private static let rsaNumWords = 64 // 2048 / 32
 
+    #if DEBUG
+    private static let debugEphemeralLock = NSLock()
+    private static var debugEphemeralKeyPair: (privateKey: SecKey, publicKey: SecKey)?
+    #endif
+
     static let log = Logger(subsystem: "com.iadb.app", category: "adb")
 
     private let privateKey: SecKey
@@ -29,7 +34,7 @@ final class ADBCrypto {
             self.publicKey = pub
             self.keyOrigin = origin
         }
-        ADBCrypto.log.info("ADBCrypto init: origin=\(self.keyOrigin, privacy: .public) pubFingerprint=\(self.publicKeyFingerprint(), privacy: .public)")
+        ADBCrypto.log.info("ADBCrypto init: origin=\(self.keyOrigin, privacy: .public) pubFingerprint=\(self.publicKeyFingerprint(), privacy: .private(mask: .hash))")
     }
 
     /// SHA256 fingerprint публичного ключа (PKCS#1 DER) — для сверки между pairing и connect.
@@ -51,7 +56,7 @@ final class ADBCrypto {
             kSecAttrKeySizeInBits as String: keySizeInBits,
             kSecPrivateKeyAttrs as String: [
                 kSecAttrIsPermanent as String: true,
-                kSecAttrApplicationTag as String: keyTag.data(using: .utf8)!
+                kSecAttrApplicationTag as String: Data(keyTag.utf8)
             ] as [String: Any]
         ]
 
@@ -64,9 +69,22 @@ final class ADBCrypto {
         }
 
         let persistErr = error?.takeRetainedValue().localizedDescription ?? "unknown"
-        log.error("Persistent key generation failed: \(persistErr, privacy: .public) — falling back to ephemeral")
+        // Another caller may have created the key between our initial lookup and
+        // SecKeyCreateRandomKey. Reuse it instead of rotating the ADB identity.
+        if let privateKey = loadPrivateKey(),
+           let publicKey = SecKeyCopyPublicKey(privateKey) {
+            return (privateKey, publicKey, "keychain-race")
+        }
 
-        // Fallback: generate ephemeral key without keychain (e.g. CI environment)
+        #if DEBUG
+        // XCTest/simulator processes may run without Keychain entitlements. A
+        // single process-wide key keeps pairing and connect on the same identity.
+        // Release builds must never pair with an identity that cannot persist.
+        debugEphemeralLock.lock()
+        defer { debugEphemeralLock.unlock() }
+        if let pair = debugEphemeralKeyPair {
+            return (pair.privateKey, pair.publicKey, "debug-ephemeral-shared")
+        }
         let ephemeralAttributes: [String: Any] = [
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
             kSecAttrKeySizeInBits as String: keySizeInBits
@@ -80,32 +98,48 @@ final class ADBCrypto {
         guard let publicKey = SecKeyCopyPublicKey(privateKey) else {
             throw ADBError.cryptoError("Failed to extract public key")
         }
-
-        return (privateKey, publicKey, "ephemeral")
+        debugEphemeralKeyPair = (privateKey, publicKey)
+        log.warning("Keychain unavailable in DEBUG: \(persistErr, privacy: .private(mask: .hash))")
+        return (privateKey, publicKey, "debug-ephemeral-shared")
+        #else
+        throw ADBError.cryptoError(
+            "Secure key storage is unavailable. Reinstall the signed app or verify Keychain access, then try again. (\(persistErr))"
+        )
+        #endif
     }
 
     private static func loadPrivateKey() -> SecKey? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
             kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-            kSecAttrApplicationTag as String: keyTag.data(using: .utf8)!,
+            kSecAttrApplicationTag as String: Data(keyTag.utf8),
             kSecReturnRef as String: true
         ]
 
         var item: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess else { return nil }
-        return (item as! SecKey) // CoreFoundation — downcast всегда успешен
+        guard let item, CFGetTypeID(item) == SecKeyGetTypeID() else {
+            log.error("Keychain returned an invalid RSA private key reference")
+            return nil
+        }
+        return unsafeBitCast(item, to: SecKey.self)
     }
 
     // MARK: - ADB Auth Operations
 
     /// Sign an ADB auth token with our private key (SHA1 + PKCS1 v1.5)
     func sign(token: Data) throws -> Data {
+        guard token.count == 20 else {
+            throw ADBError.cryptoError("ADB authentication token must be a 20-byte SHA-1 digest")
+        }
         var error: Unmanaged<CFError>?
         guard let signature = SecKeyCreateSignature(
             privateKey,
-            .rsaSignatureMessagePKCS1v15SHA1,
+            // adbd supplies an already-computed 20-byte SHA-1 token. Using the
+            // message variant would hash it a second time and produce a signature
+            // that real Android devices reject.
+            .rsaSignatureDigestPKCS1v15SHA1,
             token as CFData,
             &error
         ) else {
@@ -131,12 +165,32 @@ final class ADBCrypto {
     }
 
     /// Delete stored keys (for key rotation)
-    static func deleteKeys() {
+    @discardableResult
+    static func deleteKeys() -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassKey,
-            kSecAttrApplicationTag as String: keyTag.data(using: .utf8)!
+            kSecAttrApplicationTag as String: Data(keyTag.utf8)
         ]
-        SecItemDelete(query as CFDictionary)
+        let status = SecItemDelete(query as CFDictionary)
+        #if DEBUG
+        debugEphemeralLock.lock()
+        debugEphemeralKeyPair = nil
+        debugEphemeralLock.unlock()
+        #endif
+        return status
+    }
+
+    static func deleteStoredIdentity() throws {
+        let certificateStatus = deleteCertificate()
+        let keyStatus = deleteKeys()
+        let acceptedStatuses: Set<OSStatus> = [errSecSuccess, errSecItemNotFound]
+        guard acceptedStatuses.contains(certificateStatus),
+              acceptedStatuses.contains(keyStatus) else {
+            throw ADBError.cryptoError(
+                "Failed to remove the ADB identity from Keychain "
+                    + "(key: \(keyStatus), certificate: \(certificateStatus))"
+            )
+        }
     }
 
     // MARK: - Android RSA Public Key Encoding
@@ -368,7 +422,10 @@ final class ADBCrypto {
     /// Generates a self-signed X.509 cert from our RSA key and stores it in the Keychain.
     func tlsIdentity() throws -> SecIdentity {
         // Remove stale cert so it always matches current key
-        Self.deleteCertificate()
+        let deleteStatus = Self.deleteCertificate()
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+            throw ADBError.cryptoError("Failed to replace TLS certificate in Keychain: \(deleteStatus)")
+        }
 
         let certDER = try generateSelfSignedCert()
         guard let certificate = SecCertificateCreateWithData(nil, certDER as CFData) else {
@@ -388,7 +445,7 @@ final class ADBCrypto {
         // Keychain automatically matches cert with private key via public key hash
         let identityQuery: [String: Any] = [
             kSecClass as String: kSecClassIdentity,
-            kSecAttrApplicationTag as String: Self.keyTag.data(using: .utf8)!,
+            kSecAttrApplicationTag as String: Data(Self.keyTag.utf8),
             kSecReturnRef as String: true
         ]
         var item: CFTypeRef?
@@ -396,15 +453,19 @@ final class ADBCrypto {
         guard idStatus == errSecSuccess else {
             throw ADBError.cryptoError("Failed to create TLS identity: \(idStatus)")
         }
-        return (item as! SecIdentity)
+        guard let item, CFGetTypeID(item) == SecIdentityGetTypeID() else {
+            throw ADBError.cryptoError("Keychain returned an invalid TLS identity")
+        }
+        return unsafeBitCast(item, to: SecIdentity.self)
     }
 
-    static func deleteCertificate() {
+    @discardableResult
+    static func deleteCertificate() -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassCertificate,
             kSecAttrLabel as String: certLabel
         ]
-        SecItemDelete(query as CFDictionary)
+        return SecItemDelete(query as CFDictionary)
     }
 
     /// Build a self-signed X.509 v3 certificate in DER format.
@@ -436,7 +497,13 @@ final class ADBCrypto {
 
         // Validity: now → now + 10 years
         let now = Date()
-        let future = Calendar.current.date(byAdding: .year, value: 10, to: now)!
+        guard let future = Calendar(identifier: .gregorian).date(
+            byAdding: .year,
+            value: 10,
+            to: now
+        ) else {
+            throw ADBError.cryptoError("Failed to calculate certificate validity")
+        }
         let validity = derTag(0x30, derUTCTime(now) + derUTCTime(future))
 
         // SubjectPublicKeyInfo: algorithm + BIT STRING wrapping PKCS#1
@@ -512,8 +579,10 @@ final class ADBCrypto {
 
     func derUTCTime(_ date: Date) -> Data {
         let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.calendar = Calendar(identifier: .gregorian)
         fmt.dateFormat = "yyMMddHHmmss"
-        fmt.timeZone = TimeZone(identifier: "UTC")
+        fmt.timeZone = TimeZone(secondsFromGMT: 0)
         let str = fmt.string(from: date) + "Z"
         return derTag(0x17, Data(str.utf8))
     }

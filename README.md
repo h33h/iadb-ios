@@ -1,7 +1,7 @@
 # iADB
 
 [![Build & Test](https://github.com/h33h/iadb-ios/actions/workflows/build.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/build.yml)
-[![Build IPA](https://github.com/h33h/iadb-ios/actions/workflows/build-ipa.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/build-ipa.yml)
+[![App Store Release](https://github.com/h33h/iadb-ios/actions/workflows/release.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Run Android Wireless Debugging workflows from iPhone or iPad.
@@ -15,7 +15,7 @@ Run Android Wireless Debugging workflows from iPhone or iPad.
 - Local network device discovery
 - Quick reconnect to previously used devices
 - Device info, files, apps, shell, logcat, and screenshots in one app
-- CI workflows for testing and unsigned `.ipa` packaging
+- CI for tests, signed App Store archives, validation, and TestFlight upload
 
 ## Features
 
@@ -47,7 +47,7 @@ Run Android Wireless Debugging workflows from iPhone or iPad.
 
 ### Requirements
 
-- Xcode 15+
+- Xcode 26+
 - iOS 17+
 - Homebrew
 - `xcodegen`
@@ -63,7 +63,7 @@ brew install xcodegen
 2. Generate the Xcode project:
 
 ```bash
-xcodegen generate
+scripts/generate-project.sh
 ```
 
 3. Open `iADB.xcodeproj` in Xcode.
@@ -72,16 +72,16 @@ xcodegen generate
 ## Running Tests
 
 ```bash
-xcodegen generate
+scripts/generate-project.sh
 xcodebuild test \
   -project iADB.xcodeproj \
   -scheme iADB \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'
 ```
 
 ## Debug Android Emulator Mode
 
-Debug builds include a hidden connection-screen debug modal for production-like checks against a local Android Emulator. Long press the connection screen to open it.
+Debug builds include a hidden connection-screen debug modal for production-like checks against a local Android Emulator. Long press the Help section header to open it.
 
 Use the `iADB Android Emulator` scheme or enable `Use Android Emulator` in the debug modal. When the configured ADB endpoint is reachable, the modal injects a synthetic discovered device. `ADBClient` stays live, so connect, shell, files, apps, logcat, and screenshots still use the real ADB protocol.
 
@@ -114,14 +114,14 @@ Both devices must be on the same Wi-Fi network.
 The repository includes GitHub Actions workflows for:
 
 - build and test on pull requests and pushes to `main`
-- building an unsigned `.ipa` artifact on demand
+- signed App Store archive, validation, and optional TestFlight upload from version tags or a manual run
 
 ## Roadmap
 
 - Expand connection diagnostics and recovery hints
 - Improve file management workflows for larger transfers
 - Add more automated coverage around device-specific edge cases
-- Refine release packaging for easier testing outside Xcode
+- Expand release automation for App Store metadata and screenshots
 
 ## Project Layout
 

@@ -10,14 +10,16 @@ struct PairingFeatureTests {
         let store = TestStore(
             initialState: PairingFeature.State(
                 hostInput: "192.168.1.100",
-                portInput: "37000",
-                pairingCode: "123456"
+                portInput: "٣٧٠٠٠",
+                pairingCode: "١٢٣٤٥٦"
             )
         ) {
             PairingFeature()
         } withDependencies: {
-            $0.adbPairing.pair = { _, _, _ in
-                ADBPairing.PeerInfo(name: "Pixel 7", guid: "", publicKey: Data([1, 2, 3]))
+            $0.adbPairing.pair = { _, port, code in
+                #expect(port == 37000)
+                #expect(code == "123456")
+                return ADBPairing.PeerInfo(name: "Pixel 7", guid: "pixel-guid")
             }
         }
 
@@ -27,7 +29,7 @@ struct PairingFeatureTests {
         await store.receive(\.pairingCompleted) {
             $0.pairingState = .success("Paired with Pixel 7")
             $0.pairedDeviceName = "Pixel 7"
-            $0.pairedDevicePublicKey = Data([1, 2, 3])
+            $0.pairedDeviceGUID = "pixel-guid"
         }
     }
 
@@ -93,6 +95,40 @@ struct PairingFeatureTests {
             initialState: PairingFeature.State(
                 hostInput: "192.168.1.100",
                 portInput: "abc",
+                pairingCode: "123456"
+            )
+        ) {
+            PairingFeature()
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .error("Invalid port number")
+        }
+    }
+
+    @Test
+    func pairWithCodeRejectsInvalidCodeBeforeStarting() async {
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "37000",
+                pairingCode: "12ab56"
+            )
+        ) {
+            PairingFeature()
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .error("Invalid pairing code")
+        }
+    }
+
+    @Test
+    func pairWithCodeRejectsPortZero() async {
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "0",
                 pairingCode: "123456"
             )
         ) {
@@ -193,5 +229,38 @@ struct PairingFeatureTests {
             $0.pairingCode = ""
             $0.pairingState = .idle
         }
+    }
+
+    @Test
+    func cancelPairingCancelsInFlightWork() async {
+        let didCancel = LockIsolated(false)
+        let store = TestStore(
+            initialState: PairingFeature.State(
+                hostInput: "192.168.1.100",
+                portInput: "37000",
+                pairingCode: "123456"
+            )
+        ) {
+            PairingFeature()
+        } withDependencies: {
+            $0.adbPairing.pair = { _, _, _ in
+                do {
+                    try await Task.sleep(for: .seconds(60))
+                    return ADBPairing.PeerInfo(name: "Android Device", guid: "guid")
+                } catch {
+                    didCancel.setValue(true)
+                    throw error
+                }
+            }
+        }
+
+        await store.send(.pairWithCode) {
+            $0.pairingState = .pairing
+        }
+        await store.send(.cancelPairing) {
+            $0.pairingState = .idle
+        }
+        await Task.yield()
+        #expect(didCancel.value)
     }
 }

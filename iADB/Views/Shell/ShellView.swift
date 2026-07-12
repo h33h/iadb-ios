@@ -4,10 +4,21 @@ import ComposableArchitecture
 struct ShellView: View {
     @Bindable var store: StoreOf<ShellFeature>
     @FocusState private var isInputFocused: Bool
+    @State private var showingClearHistoryConfirmation = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                if let error = store.errorMessage {
+                    StatusBannerView(
+                        style: .error,
+                        message: error,
+                        onDismiss: { store.send(.dismissError) }
+                    )
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
+
                 if !store.pinnedCommands.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
@@ -35,6 +46,8 @@ struct ShellView: View {
                                         .cornerRadius(8)
                                     }
                                     .buttonStyle(.plain)
+                                    .frame(minHeight: 44)
+                                    .disabled(store.isExecuting)
                                     .contextMenu {
                                         Button {
                                             store.send(.useHistoryCommand(command))
@@ -84,6 +97,7 @@ struct ShellView: View {
                                         store.send(.togglePinnedCommand(cmd))
                                     }
                                 )
+                                .disabled(store.isExecuting)
                             }
                         }
                         .padding(.horizontal)
@@ -125,20 +139,31 @@ struct ShellView: View {
                         .disableAutocorrection(true)
                         .focused($isInputFocused)
                         .onSubmit {
+                            isInputFocused = false
                             store.send(.executeCommand)
                         }
 
                     if store.isExecuting {
-                        ProgressView()
-                            .scaleEffect(0.8)
+                        Button {
+                            store.send(.cancelExecution)
+                        } label: {
+                            Image(systemName: "stop.circle.fill")
+                                .font(.title3)
+                                .foregroundStyle(.red)
+                        }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .accessibilityLabel("Stop command")
                     } else {
                         Button {
+                            isInputFocused = false
                             store.send(.executeCommand)
                         } label: {
                             Image(systemName: "arrow.right.circle.fill")
                                 .font(.title3)
                         }
+                        .frame(minWidth: 44, minHeight: 44)
                         .disabled(store.commandInput.isEmpty)
+                        .accessibilityLabel("Run command")
                     }
                 }
                 .padding(.horizontal)
@@ -150,16 +175,32 @@ struct ShellView: View {
             .onAppear {
                 store.send(.onAppear)
             }
+            .onDisappear {
+                store.send(.cancelExecution)
+            }
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     if !store.history.isEmpty {
                         Button {
-                            store.send(.clearHistory)
+                            showingClearHistoryConfirmation = true
                         } label: {
                             Image(systemName: "trash")
                         }
+                        .accessibilityLabel("Clear shell history")
                     }
                 }
+            }
+            .confirmationDialog(
+                "Clear Shell History?",
+                isPresented: $showingClearHistoryConfirmation,
+                titleVisibility: .visible
+            ) {
+                Button("Clear History", role: .destructive) {
+                    store.send(.clearHistory)
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This permanently removes all saved command output.")
             }
         }
     }
@@ -246,6 +287,7 @@ struct QuickCommandChip: View {
             .cornerRadius(8)
         }
         .buttonStyle(.plain)
+        .frame(minHeight: 44)
         .contextMenu {
             Button(action: onTogglePin) {
                 Label(isPinned ? "Unpin Command" : "Pin Command", systemImage: isPinned ? "pin.slash" : "pin")

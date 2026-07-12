@@ -15,6 +15,19 @@ struct FileEntry: Identifiable, Hashable {
     let symlinkTarget: String?
     let fullPath: String
 
+    /// Android's `ls` does not expose whether a symlink target is a directory.
+    /// Allow opening links optimistically; a link to a regular file remains
+    /// available through its context actions if directory loading fails.
+    var isNavigableDirectory: Bool { isDirectory || isSymlink }
+
+    var displayName: String {
+        name.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar)
+                ? String(format: "\\u{%04X}", scalar.value)
+                : String(scalar)
+        }.joined()
+    }
+
     var displaySize: String {
         guard let bytes = Int64(size) else { return size }
         if bytes < 1024 { return "\(bytes) B" }

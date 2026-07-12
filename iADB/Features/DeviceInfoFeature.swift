@@ -3,11 +3,20 @@ import ComposableArchitecture
 
 @Reducer
 struct DeviceInfoFeature {
+    enum ErrorRecovery: Equatable {
+        case fetch
+        case reboot(String)
+    }
+
     @ObservableState
     struct State: Equatable {
         var details = DeviceDetails()
         var isLoading = false
+        var isRebooting = false
         var errorMessage: String?
+        var rebootStatusMessage: String?
+        var errorRecovery: ErrorRecovery?
+        var activeRebootMode: String?
     }
 
     enum Action {
@@ -15,6 +24,9 @@ struct DeviceInfoFeature {
         case deviceInfoLoaded(Result<DeviceDetails, Error>)
         case reboot(mode: String)
         case rebootResult(Result<Void, Error>)
+        case retryError
+        case dismissError
+        case cancelAll
     }
 
     private enum CancelID { case fetchInfo, reboot }
@@ -27,6 +39,7 @@ struct DeviceInfoFeature {
             case .fetchDeviceInfo:
                 state.isLoading = true
                 state.errorMessage = nil
+                state.errorRecovery = nil
 
                 return .run { send in
                     var details = DeviceDetails()
@@ -49,12 +62,8 @@ struct DeviceInfoFeature {
                         details.screenResolution = String(resOutput[sizeRange])
                     }
 
-                    if let ipOutput = try? await adbClient.shell("ip route show dev wlan0"),
-                       let ipRange = ipOutput.range(of: "\\d+\\.\\d+\\.\\d+\\.\\d+\\s+dev", options: .regularExpression) {
-                        let segment = ipOutput[ipRange]
-                        if let addrRange = segment.range(of: "\\d+\\.\\d+\\.\\d+\\.\\d+", options: .regularExpression) {
-                            details.ipAddress = String(segment[addrRange])
-                        }
+                    if let ipOutput = try? await adbClient.shell("ip -4 route get 1.1.1.1") {
+                        details.ipAddress = Self.sourceIPAddress(from: ipOutput) ?? ""
                     }
 
                     if let memOutput = try? await adbClient.shell("cat /proc/meminfo") {
@@ -86,6 +95,7 @@ struct DeviceInfoFeature {
 
                     await send(.deviceInfoLoaded(.success(details)))
                 } catch: { error, send in
+                    guard !(error is CancellationError) else { return }
                     await send(.deviceInfoLoaded(.failure(error)))
                 }
                 .cancellable(id: CancelID.fetchInfo, cancelInFlight: true)
@@ -93,28 +103,75 @@ struct DeviceInfoFeature {
             case .deviceInfoLoaded(.success(let details)):
                 state.isLoading = false
                 state.details = details
+                state.errorRecovery = nil
                 return .none
 
             case .deviceInfoLoaded(.failure(let error)):
                 state.isLoading = false
                 state.errorMessage = error.localizedDescription
+                state.errorRecovery = .fetch
                 return .none
 
             case .reboot(let mode):
+                guard !state.isRebooting else { return .none }
+                state.isRebooting = true
+                state.errorMessage = nil
+                state.errorRecovery = nil
+                state.rebootStatusMessage = nil
+                state.activeRebootMode = mode
                 return .run { send in
                     try await adbClient.reboot(mode)
                     await send(.rebootResult(.success(())))
                 } catch: { error, send in
+                    guard !(error is CancellationError) else { return }
                     await send(.rebootResult(.failure(error)))
                 }
+                .cancellable(id: CancelID.reboot, cancelInFlight: true)
 
             case .rebootResult(.success):
+                state.isRebooting = false
+                state.activeRebootMode = nil
+                state.rebootStatusMessage = "Reboot command sent. Waiting for the device to come back online…"
                 return .none
 
             case .rebootResult(.failure(let error)):
+                state.isRebooting = false
                 state.errorMessage = error.localizedDescription
+                state.errorRecovery = .reboot(state.activeRebootMode ?? "")
+                state.activeRebootMode = nil
                 return .none
+
+            case .retryError:
+                switch state.errorRecovery {
+                case .fetch: return .send(.fetchDeviceInfo)
+                case .reboot(let mode): return .send(.reboot(mode: mode))
+                case nil: return .none
+                }
+
+            case .dismissError:
+                state.errorMessage = nil
+                state.errorRecovery = nil
+                return .none
+
+            case .cancelAll:
+                state.isLoading = false
+                state.isRebooting = false
+                state.activeRebootMode = nil
+                return .merge(
+                    .cancel(id: CancelID.fetchInfo),
+                    .cancel(id: CancelID.reboot)
+                )
             }
         }
+    }
+
+    static func sourceIPAddress(from routeOutput: String) -> String? {
+        guard let sourceRange = routeOutput.range(
+            of: "\\bsrc\\s+(?:\\d{1,3}\\.){3}\\d{1,3}\\b",
+            options: .regularExpression
+        ) else { return nil }
+
+        let sourceField = routeOutput[sourceRange]
+        return sourceField.split(whereSeparator: \.isWhitespace).last.map(String.init)
     }
 }

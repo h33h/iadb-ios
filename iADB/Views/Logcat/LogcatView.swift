@@ -10,6 +10,18 @@ struct LogcatView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
+                if let error = store.errorMessage {
+                    StatusBannerView(
+                        style: .error,
+                        message: error,
+                        actionTitle: "Retry",
+                        onDismiss: { store.send(.dismissError) },
+                        onAction: { store.send(.startLogcat) }
+                    )
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                }
+
                 if !store.savedPresets.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
@@ -53,6 +65,8 @@ struct LogcatView: View {
                         Image(systemName: store.isRunning ? "stop.fill" : "play.fill")
                             .foregroundColor(store.isRunning ? .red : .green)
                     }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel(store.isRunning ? "Stop log capture" : "Start log capture")
 
                     // Pause
                     Button {
@@ -60,7 +74,9 @@ struct LogcatView: View {
                     } label: {
                         Image(systemName: store.isPaused ? "play.circle" : "pause.circle")
                     }
+                    .frame(minWidth: 44, minHeight: 44)
                     .disabled(!store.isRunning)
+                    .accessibilityLabel(store.isPaused ? "Resume log display" : "Pause log display")
 
                     Divider().frame(height: 20)
 
@@ -81,6 +97,8 @@ struct LogcatView: View {
                             .background(Color(.systemGray5))
                             .cornerRadius(4)
                     }
+                    .frame(minHeight: 44)
+                    .accessibilityLabel("Log level: \(store.selectedLevel?.rawValue ?? "All")")
 
                     Spacer()
 
@@ -96,6 +114,8 @@ struct LogcatView: View {
                         Image(systemName: "trash")
                             .font(.caption)
                     }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .accessibilityLabel("Clear logs")
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 8)
@@ -115,6 +135,8 @@ struct LogcatView: View {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
                         }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .accessibilityLabel("Clear log filter")
                     }
                 }
                 .padding(.horizontal)
@@ -133,7 +155,7 @@ struct LogcatView: View {
                     .disabled(store.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                     Button("Export") {
-                        exportText = exportString(from: store.filteredEntries)
+                        exportText = LogcatFeature.exportString(store.filteredEntries)
                         showingExportSheet = true
                     }
                     .buttonStyle(.bordered)
@@ -146,7 +168,17 @@ struct LogcatView: View {
                 Divider()
 
                 // Log entries
-                if store.filteredEntries.isEmpty && !store.isRunning {
+                if store.filteredEntries.isEmpty && store.isRunning {
+                    VStack(spacing: 12) {
+                        Spacer()
+                        ProgressView()
+                        Text(store.isPaused ? "Log display paused" : "Waiting for log output…")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity)
+                } else if store.filteredEntries.isEmpty && !store.isRunning {
                     VStack(spacing: 12) {
                         Spacer()
                         Image(systemName: "doc.text")
@@ -189,6 +221,7 @@ struct LogcatView: View {
                     Toggle(isOn: $store.autoScroll) {
                         Image(systemName: "arrow.down.to.line")
                     }
+                    .accessibilityLabel("Auto-scroll logs")
                 }
             }
             .sheet(isPresented: $showingExportSheet, onDismiss: {
@@ -198,12 +231,6 @@ struct LogcatView: View {
                 ShareTextSheet(text: exportText, fileName: "logcat.txt")
             }
         }
-    }
-
-    private func exportString(from entries: [LogEntry]) -> String {
-        entries
-            .map { "\($0.timestamp) \($0.pid) \($0.tid) \($0.level.rawValue) \($0.tag): \($0.message)" }
-            .joined(separator: "\n")
     }
 
     private func levelName(_ level: LogEntry.LogLevel) -> String {

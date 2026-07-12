@@ -10,7 +10,7 @@ struct PairingFeature {
         var pairingCode = ""
         var pairingState: PairingState = .idle
         var pairedDeviceName: String?
-        var pairedDevicePublicKey: Data?
+        var pairedDeviceGUID: String?
         var isPrefilled = false
         /// mDNS service name спариваемого устройства (если pair вызван из discovery).
         var serviceName: String?
@@ -37,7 +37,8 @@ struct PairingFeature {
         case binding(BindingAction<State>)
         case pairWithCode
         case pairingResult(Result<String, Error>)
-        case pairingCompleted(name: String, publicKey: Data)
+        case pairingCompleted(name: String, guid: String)
+        case cancelPairing
         case reset
     }
 
@@ -56,7 +57,11 @@ struct PairingFeature {
                 let host = state.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
                 let code = state.pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !host.isEmpty, !code.isEmpty else { return .none }
-                guard let port = UInt16(state.portInput.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+                guard let normalizedCode = try? ADBPairing.normalizedPairingCode(code) else {
+                    state.pairingState = .error("Invalid pairing code")
+                    return .none
+                }
+                guard let port = LocalizedDecimalInput.positiveUInt16(state.portInput) else {
                     state.pairingState = .error("Invalid port number")
                     return .none
                 }
@@ -64,17 +69,18 @@ struct PairingFeature {
                 state.pairingState = .pairing
 
                 return .run { send in
-                    let peerInfo = try await adbPairing.pair(host, port, code)
-                    await send(.pairingCompleted(name: peerInfo.name, publicKey: peerInfo.publicKey))
+                    let peerInfo = try await adbPairing.pair(host, port, normalizedCode)
+                    await send(.pairingCompleted(name: peerInfo.name, guid: peerInfo.guid))
                 } catch: { error, send in
+                    guard !(error is CancellationError) else { return }
                     await send(.pairingResult(.failure(error)))
                 }
                 .cancellable(id: CancelID.pairing)
 
-            case .pairingCompleted(let name, let publicKey):
+            case .pairingCompleted(let name, let guid):
                 state.pairingState = .success("Paired with \(name)")
                 state.pairedDeviceName = name
-                state.pairedDevicePublicKey = publicKey
+                state.pairedDeviceGUID = guid
                 return .none
 
             case .pairingResult(.success(let deviceName)):
@@ -86,10 +92,15 @@ struct PairingFeature {
                 state.pairingState = .error(error.localizedDescription)
                 return .none
 
+            case .cancelPairing:
+                guard state.pairingState.isPairing else { return .none }
+                state.pairingState = .idle
+                return .cancel(id: CancelID.pairing)
+
             case .reset:
                 state.pairingCode = ""
                 state.pairingState = .idle
-                return .none
+                return .cancel(id: CancelID.pairing)
             }
         }
     }

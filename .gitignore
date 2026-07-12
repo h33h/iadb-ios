@@ -15,7 +15,6 @@ xcuserdata/
 .swiftpm/
 Packages/
 Package.pins
-Package.resolved
 
 # macOS
 .DS_Store

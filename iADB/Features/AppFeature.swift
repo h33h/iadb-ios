@@ -34,6 +34,7 @@ struct AppFeature {
         case shell(ShellFeature.Action)
         case logcat(LogcatFeature.Action)
         case screenshot(ScreenshotFeature.Action)
+        case resetDisconnectedChildren(returnToConnection: Bool)
     }
 
     var body: some ReducerOf<Self> {
@@ -64,8 +65,10 @@ struct AppFeature {
                 state.selectedTab = tab
                 return .none
 
-            case .connection(.connectionResult(.success)):
+            case .connection(.connectionResult(let generation, .success)):
                 // On successful connection, fetch initial data
+                guard state.connection.connectionState.isConnected,
+                      state.connection.activeConnectionGeneration == generation else { return .none }
                 return .merge(
                     .send(.device(.fetchDeviceInfo)),
                     .send(.fileManager(.loadDirectory(path: nil))),
@@ -73,21 +76,56 @@ struct AppFeature {
                 )
 
             case .connection(.disconnect):
-                // Сначала остановить logcat (пока state ещё не сброшен)
-                let stopEffect: Effect<Action> = state.logcat.isRunning
-                    ? .send(.logcat(.stopLogcat))
-                    : .none
+                return lifecycleResetEffect(returnToConnection: false)
+
+            case .connection(.connectionLost):
+                return lifecycleResetEffect(returnToConnection: true)
+
+            case .resetDisconnectedChildren(let returnToConnection):
+                if returnToConnection {
+                    state.selectedTab = .connection
+                }
+                // The Shell reducer's persistence writer lives for the store's
+                // lifetime. Keep its monotonically increasing generation when
+                // clearing device-specific UI so later saves are not mistaken
+                // for stale pre-disconnect snapshots.
+                let shellPersistenceGeneration = state.shell.persistenceGeneration
                 state.device = DeviceInfoFeature.State()
                 state.apps = AppsFeature.State()
                 state.fileManager = FileManagerFeature.State()
                 state.shell = ShellFeature.State()
+                state.shell.persistenceGeneration = shellPersistenceGeneration
                 state.logcat = LogcatFeature.State()
                 state.screenshot = ScreenshotFeature.State()
-                return stopEffect
+                return .none
+
+            case .device(.rebootResult(.success)):
+                guard let generation = state.connection.activeConnectionGeneration else { return .none }
+                return .send(
+                    .connection(
+                        .connectionLost(
+                            generation: generation,
+                            "The Android device is rebooting. Wait until Wireless debugging is available, "
+                                + "then tap Reconnect or Rescan."
+                        )
+                    )
+                )
 
             default:
                 return .none
             }
         }
+    }
+
+    private func lifecycleResetEffect(returnToConnection: Bool) -> Effect<Action> {
+        .concatenate(
+            .send(.device(.cancelAll)),
+            .send(.apps(.cancelAll)),
+            .send(.fileManager(.cancelCurrentOperation)),
+            .send(.shell(.cancelAll)),
+            .send(.logcat(.stopLogcat)),
+            .send(.screenshot(.cancelAll)),
+            .send(.resetDisconnectedChildren(returnToConnection: returnToConnection))
+        )
     }
 }

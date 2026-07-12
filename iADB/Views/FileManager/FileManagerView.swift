@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
+import ImageIO
 import ComposableArchitecture
 
 struct FileManagerView: View {
@@ -22,48 +23,49 @@ struct FileManagerView: View {
     @State private var showingRenameAlert = false
     @State private var showingMoveAlert = false
     @State private var showingShareSheet = false
-    @State private var shareData: Data?
-    @State private var shareFileName: String = ""
+    @State private var shareURL: URL?
 
     var body: some View {
         NavigationStack {
             AnyView(navigationContent)
+                .navigationTitle("Files")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(content: {
+                    ToolbarItem(placement: .primaryAction) {
+                        Menu {
+                            Button {
+                                store.send(.toggleSelectionMode)
+                            } label: {
+                                Label(store.isSelectionMode ? "Done Selecting" : "Select Multiple", systemImage: store.isSelectionMode ? "checkmark.circle" : "checklist")
+                            }
+                            Button {
+                                showingNewFolder = true
+                            } label: {
+                                Label("New Folder", systemImage: "folder.badge.plus")
+                            }
+                            Button {
+                                showingNewFile = true
+                            } label: {
+                                Label("New File", systemImage: "doc.badge.plus")
+                            }
+                            Button {
+                                showingImportPicker = true
+                            } label: {
+                                Label("Upload File", systemImage: "arrow.up.circle")
+                            }
+                            Button {
+                                store.send(.loadDirectory(path: nil))
+                            } label: {
+                                Label("Refresh", systemImage: "arrow.clockwise")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .accessibilityLabel("File actions")
+                        .disabled(store.isLoading)
+                    }
+                })
         }
-        .navigationTitle("Files")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(content: {
-            ToolbarItem(placement: .primaryAction) {
-                Menu {
-                    Button {
-                        store.send(.toggleSelectionMode)
-                    } label: {
-                        Label(store.isSelectionMode ? "Done Selecting" : "Select Multiple", systemImage: store.isSelectionMode ? "checkmark.circle" : "checklist")
-                    }
-                    Button {
-                        showingNewFolder = true
-                    } label: {
-                        Label("New Folder", systemImage: "folder.badge.plus")
-                    }
-                    Button {
-                        showingNewFile = true
-                    } label: {
-                        Label("New File", systemImage: "doc.badge.plus")
-                    }
-                    Button {
-                        showingImportPicker = true
-                    } label: {
-                        Label("Upload File", systemImage: "arrow.up.circle")
-                    }
-                    Button {
-                        store.send(.loadDirectory(path: nil))
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-        })
         .alert("New Folder", isPresented: $showingNewFolder) {
             TextField("Folder name", text: $newFolderName)
             Button("Create") {
@@ -120,7 +122,7 @@ struct FileManagerView: View {
             }
         } message: {
             if let entry = entryToMove {
-                Text("Move \(entry.name) to a new absolute path")
+                Text("Move \(entry.displayName) to a new absolute path")
             }
         }
         .confirmationDialog("Delete?", isPresented: $showingDeleteConfirm) {
@@ -130,7 +132,7 @@ struct FileManagerView: View {
                 }
             }
         } message: {
-            Text("Delete \(entryToDelete?.name ?? "this item")?")
+            Text("Delete \(entryToDelete?.displayName ?? "this item")?")
         }
         .confirmationDialog("Delete Selected?", isPresented: $showingBatchDeleteConfirm) {
             Button("Delete", role: .destructive) {
@@ -141,39 +143,47 @@ struct FileManagerView: View {
             Text("Delete \(store.selectedEntryPaths.count) selected items?")
         }
         .fileImporter(isPresented: $showingImportPicker, allowedContentTypes: [.data], allowsMultipleSelection: false) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                guard url.startAccessingSecurityScopedResource() else { return }
-                defer { url.stopAccessingSecurityScopedResource() }
-                if let data = try? Data(contentsOf: url) {
-                    store.send(.pushFileData(data: data, fileName: url.lastPathComponent))
-                }
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                store.send(.pushFile(url: url, fileName: url.lastPathComponent))
+            case .failure(let error):
+                store.send(.reportError("Could not import the file: \(error.localizedDescription)"))
             }
         }
-        .onChange(of: store.downloadedFileData, shareDownloadedFileIfNeeded)
+        .onChange(of: store.downloadedFileURL, shareDownloadedFileIfNeeded)
         .sheet(isPresented: $showingShareSheet) {
-            if let data = shareData {
-                ShareSheet(data: data, fileName: shareFileName)
+            if let shareURL {
+                ShareURLSheet(url: shareURL)
             }
         }
         .onChange(of: showingShareSheet) { _, isPresented in
             if !isPresented {
-                shareData = nil
+                shareURL = nil
                 store.send(.clearDownloadedFile)
             }
         }
         .confirmationDialog(
-            store.selectedFile?.name ?? "File Actions",
+            store.selectedFile?.displayName ?? "File Actions",
             isPresented: fileActionsBinding,
             titleVisibility: .visible
         ) {
             if let file = store.selectedFile {
+                if file.isSymlink {
+                    Button("Open Link as Folder") {
+                        store.send(.navigateTo(file))
+                    }
+                }
+
                 Button("Preview") {
                     store.send(.previewSelectedFile)
                 }
                 .disabled(!file.isPreviewable)
 
-                Button("Download") {
-                    store.send(.downloadSelectedFile)
+                if !file.isDirectory {
+                    Button("Download") {
+                        store.send(.downloadSelectedFile)
+                    }
                 }
 
                 Button("Rename") {
@@ -236,10 +246,12 @@ struct FileManagerView: View {
                 PathBar(
                     path: store.currentPath,
                     canGoBack: store.pathHistory.count > 1,
+                    canGoUp: store.currentPath != "/",
                     onBack: { store.send(.goBack) },
                     onUp: { store.send(.navigateUp) },
                     onPathTap: showCurrentPathEditor
                 )
+                .disabled(store.isLoading)
 
                 if store.isSelectionMode {
                     selectionBanner
@@ -268,9 +280,13 @@ struct FileManagerView: View {
     }
 
     private var loadingContent: some View {
-        VStack {
+        VStack(spacing: 16) {
             Spacer()
             ProgressView("Loading...")
+            Button("Cancel") {
+                store.send(.cancelCurrentOperation)
+            }
+            .buttonStyle(.bordered)
             Spacer()
         }
     }
@@ -283,6 +299,13 @@ struct FileManagerView: View {
                 .foregroundColor(.red)
             Text("Error")
                 .font(.headline)
+            if let message = store.errorMessage {
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
             Button("Retry") {
                 store.send(.loadDirectory(path: nil))
             }
@@ -300,6 +323,25 @@ struct FileManagerView: View {
             Text("Empty Directory")
                 .font(.headline)
                 .foregroundColor(.secondary)
+            Text("Create a folder or upload a file to continue.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+            HStack {
+                Button {
+                    showingNewFolder = true
+                } label: {
+                    Label("New Folder", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    showingImportPicker = true
+                } label: {
+                    Label("Upload", systemImage: "arrow.up.circle")
+                }
+                .buttonStyle(.borderedProminent)
+            }
             Spacer()
         }
         .frame(maxWidth: .infinity)
@@ -313,7 +355,8 @@ struct FileManagerView: View {
                 isSelected: store.selectedEntryPaths.contains(entry.fullPath),
                 onOpen: openEntry,
                 onDownload: downloadEntry,
-                onDelete: confirmDelete
+                onDelete: confirmDelete,
+                onActions: { store.send(.selectFile($0)) }
             )
         }
         .listStyle(.plain)
@@ -337,10 +380,9 @@ struct FileManagerView: View {
         showingDeleteConfirm = true
     }
 
-    private func shareDownloadedFileIfNeeded(_: Data?, _ newValue: Data?) {
-        guard let data = newValue else { return }
-        shareData = data
-        shareFileName = store.selectedFile?.name ?? "file"
+    private func shareDownloadedFileIfNeeded(_: URL?, _ newValue: URL?) {
+        guard let url = newValue else { return }
+        shareURL = url
         showingShareSheet = true
     }
 
@@ -348,7 +390,10 @@ struct FileManagerView: View {
         Binding(
             get: { store.showingFileActions },
             set: { isPresented in
-                if !isPresented {
+                // Action reducers dismiss the dialog before their async work
+                // starts. Preserve the selected file in that case so preview
+                // and download destinations still have their source context.
+                if !isPresented, store.showingFileActions {
                     closeFileActions()
                 }
             }
@@ -390,7 +435,7 @@ struct FileManagerView: View {
         if let file = store.selectedFile {
             StatusBannerView(
                 style: .progress,
-                message: "Loading \(file.name)...",
+                message: "Loading \(file.displayName)...",
                 showsProgress: true
             )
             .padding(.horizontal)
@@ -406,37 +451,66 @@ struct FileListEntryView: View {
     let onOpen: (FileEntry) -> Void
     let onDownload: (FileEntry) -> Void
     let onDelete: (FileEntry) -> Void
+    let onActions: (FileEntry) -> Void
 
     var body: some View {
-        FileEntryRow(entry: entry, isSelectionMode: isSelectionMode, isSelected: isSelected)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onOpen(entry)
-            }
-            .swipeActions(edge: .trailing) {
-                if !isSelectionMode {
-                    Button(role: .destructive) {
-                        onDelete(entry)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
-                    }
+        Button {
+            onOpen(entry)
+        } label: {
+            FileEntryRow(entry: entry, isSelectionMode: isSelectionMode, isSelected: isSelected)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(entry.isDirectory ? "Folder \(entry.displayName)" : entry.isSymlink ? "Link \(entry.displayName)" : "File \(entry.displayName)")
+        .accessibilityHint(isSelectionMode ? "Selects this item" : entry.isDirectory ? "Opens this folder" : "Shows item actions")
+        .contextMenu {
+            if !isSelectionMode {
+                Button {
+                    onActions(entry)
+                } label: {
+                    Label("More Actions", systemImage: "ellipsis.circle")
+                }
 
-                    if !entry.isDirectory {
-                        Button {
-                            onDownload(entry)
-                        } label: {
-                            Label("Download", systemImage: "arrow.down.circle")
-                        }
-                        .tint(.blue)
+                if !entry.isDirectory {
+                    Button {
+                        onDownload(entry)
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
                     }
                 }
+
+                Button(role: .destructive) {
+                    onDelete(entry)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
             }
+        }
+        .swipeActions(edge: .trailing) {
+            if !isSelectionMode {
+                Button(role: .destructive) {
+                    onDelete(entry)
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+
+                if !entry.isDirectory {
+                    Button {
+                        onDownload(entry)
+                    } label: {
+                        Label("Download", systemImage: "arrow.down.circle")
+                    }
+                    .tint(.blue)
+                }
+            }
+        }
     }
 }
 
 struct PathBar: View {
     let path: String
     let canGoBack: Bool
+    let canGoUp: Bool
     let onBack: () -> Void
     let onUp: () -> Void
     let onPathTap: () -> Void
@@ -446,17 +520,26 @@ struct PathBar: View {
             Button(action: onBack) {
                 Image(systemName: "chevron.left")
             }
+            .frame(minWidth: 44, minHeight: 44)
             .disabled(!canGoBack)
+            .accessibilityLabel("Back")
 
             Button(action: onUp) {
                 Image(systemName: "arrow.up")
             }
+            .frame(minWidth: 44, minHeight: 44)
+            .disabled(!canGoUp)
+            .accessibilityLabel("Parent folder")
 
-            Text(path)
-                .font(.system(.caption, design: .monospaced))
-                .lineLimit(1)
-                .truncationMode(.head)
-                .onTapGesture(perform: onPathTap)
+            Button(action: onPathTap) {
+                Text(path)
+                    .font(.system(.caption, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.head)
+            }
+            .buttonStyle(.plain)
+            .frame(minHeight: 44)
+            .accessibilityLabel("Current path \(path). Double-tap to edit.")
 
             Spacer()
         }
@@ -483,7 +566,7 @@ struct FileEntryRow: View {
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.name)
+                Text(entry.displayName)
                     .font(.body)
                     .lineLimit(1)
                 HStack(spacing: 8) {
@@ -524,6 +607,16 @@ struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
+struct ShareURLSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
 struct FilePreviewSheet: View {
     let entry: FileEntry
     let data: Data
@@ -537,7 +630,7 @@ struct FilePreviewSheet: View {
                 PreviewMetadataBar(entry: entry, data: data)
 
                 Group {
-                    if let image = UIImage(data: data) {
+                    if let image = previewImage {
                         ScrollView([.horizontal, .vertical]) {
                             Image(uiImage: image)
                                 .resizable()
@@ -562,7 +655,7 @@ struct FilePreviewSheet: View {
                     }
                 }
             }
-            .navigationTitle(entry.name)
+            .navigationTitle(entry.displayName)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItemGroup(placement: .topBarLeading) {
@@ -603,9 +696,31 @@ struct FilePreviewSheet: View {
     }
 
     private var previewText: String? {
-        String(data: data, encoding: .utf8)
-            ?? String(data: data, encoding: .utf16)
-            ?? String(data: data, encoding: .ascii)
+        let maximumTextBytes = 512 * 1024
+        let wasTruncated = data.count > maximumTextBytes
+        let bounded = Data(data.prefix(maximumTextBytes))
+        guard var text = String(data: bounded, encoding: .utf8)
+            ?? String(data: bounded, encoding: .utf16)
+            ?? String(data: bounded, encoding: .ascii) else { return nil }
+        if wasTruncated {
+            text += "\n\n… Preview truncated at 512 KiB. Download the file to view all content."
+        }
+        return text
+    }
+
+    private var previewImage: UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { return nil }
+        let pixelWidth = width.int64Value
+        let pixelHeight = height.int64Value
+        guard pixelWidth > 0,
+              pixelHeight > 0,
+              pixelWidth <= 16_384,
+              pixelHeight <= 16_384,
+              pixelWidth <= 40_000_000 / pixelHeight else { return nil }
+        return UIImage(data: data)
     }
 }
 
@@ -635,10 +750,11 @@ struct PreviewMetadataBar: View {
     }
 
     private var imageDimensions: String? {
-        guard let image = UIImage(data: data) else { return nil }
-        let width = Int(image.size.width)
-        let height = Int(image.size.height)
-        return "\(width)x\(height)"
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else { return nil }
+        return "\(width.intValue)x\(height.intValue)"
     }
 }
 

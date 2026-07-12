@@ -1,10 +1,20 @@
-name: Release
+name: App Store Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: App Store version (for example, 1.0.0)
+        required: true
+        default: 1.0.0
+        type: string
+      upload_to_testflight:
+        description: Upload the validated IPA to TestFlight
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -12,77 +22,223 @@ permissions:
 jobs:
   release:
     runs-on: macos-15
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup
+      - name: Verify release secrets
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
         run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          missing=0
+          for name in APPLE_TEAM_ID BUILD_CERTIFICATE_BASE64 P12_PASSWORD \
+            BUILD_PROVISION_PROFILE_BASE64 ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY_BASE64; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Select latest Xcode and generate project
+        run: |
+          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
           sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
           xcodebuild -version
           brew install xcodegen
-          xcodegen generate
+          scripts/generate-project.sh
 
-      - name: Select simulator
-        id: test-setup
+      - name: Resolve App Store version and build number
+        env:
+          MANUAL_VERSION: ${{ inputs.marketing_version }}
         run: |
-          SIM_DEST=$(xcrun simctl list devices available -j | python3 -c "
-          import json, sys, re
-          data = json.load(sys.stdin)
-          best = None
-          for runtime, devices in data['devices'].items():
-              if 'iOS' not in runtime: continue
-              m = re.search(r'(\d+)[-.](\d+)', runtime)
-              if not m: continue
-              ver = (int(m.group(1)), int(m.group(2)))
-              for d in devices:
-                  if 'iPhone' in d['name'] and d['isAvailable']:
-                      if best is None or ver > best[0]:
-                          best = (ver, d['name'], d['udid'])
-          print(f'platform=iOS Simulator,id={best[2]}' if best else 'platform=iOS Simulator')
-          ")
-          echo "destination=$SIM_DEST" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            MARKETING_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            MARKETING_VERSION="$MANUAL_VERSION"
+          fi
+          if [[ ! "$MARKETING_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must contain three numeric components: $MARKETING_VERSION"
+            exit 1
+          fi
 
-      - name: Test
+          # A workflow retry must also produce a new App Store build.
+          CURRENT_PROJECT_VERSION="${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          echo "MARKETING_VERSION=$MARKETING_VERSION" >> "$GITHUB_ENV"
+          echo "CURRENT_PROJECT_VERSION=$CURRENT_PROJECT_VERSION" >> "$GITHUB_ENV"
+          echo "Building iADB $MARKETING_VERSION ($CURRENT_PROJECT_VERSION)"
+
+      - name: Run release tests
         run: |
-          set -o pipefail
+          DESTINATION=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          phones = [d for r, ds in devices.items() if "iOS" in r for d in ds if d.get("isAvailable") and "iPhone" in d["name"]]
+          if not phones: raise SystemExit("No available iPhone simulator")
+          print("platform=iOS Simulator,id=" + phones[-1]["udid"])
+          ')
           xcodebuild test \
             -project iADB.xcodeproj \
             -scheme iADB \
-            -destination '${{ steps.test-setup.outputs.destination }}' \
+            -destination "$DESTINATION" \
             -skipMacroValidation \
-            -skipPackagePluginValidation \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            -skipPackagePluginValidation
 
-      - name: Build Release & Package IPA
+      - name: Install signing identity and provisioning profile
+        id: signing
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          BUILD_PROVISION_PROFILE_BASE64: ${{ secrets.BUILD_PROVISION_PROFILE_BASE64 }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/distribution.mobileprovision"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+
+          echo "$BUILD_CERTIFICATE_BASE64" | base64 --decode > "$CERTIFICATE_PATH"
+          echo "$BUILD_PROVISION_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH" login.keychain-db
+
+          security cms -D -i "$PROFILE_PATH" > "$RUNNER_TEMP/profile.plist"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/profile.plist")
+          PROFILE_TEAM=$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$RUNNER_TEMP/profile.plist")
+          [[ "$PROFILE_TEAM" == "$APPLE_TEAM_ID" ]] || {
+            echo "::error::Provisioning profile belongs to team $PROFILE_TEAM, expected $APPLE_TEAM_ID"
+            exit 1
+          }
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          echo "profile_name=$PROFILE_NAME" >> "$GITHUB_OUTPUT"
+          echo "profile_uuid=$PROFILE_UUID" >> "$GITHUB_OUTPUT"
+          echo "keychain_path=$KEYCHAIN_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Create signed archive
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -o pipefail
-          xcodebuild build \
+          mkdir -p build
+          xcodebuild archive \
             -project iADB.xcodeproj \
             -scheme iADB \
             -configuration Release \
-            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/iADB.xcarchive \
             -skipMacroValidation \
             -skipPackagePluginValidation \
-            ONLY_ACTIVE_ARCH=NO \
-            SWIFT_ENABLE_EXPLICIT_MODULES=NO \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            AD_HOC_CODE_SIGNING_ALLOWED=YES \
-            DEVELOPMENT_TEAM=""
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY='Apple Distribution' \
+            PROVISIONING_PROFILE_SPECIFIER='${{ steps.signing.outputs.profile_name }}' \
+            OTHER_CODE_SIGN_FLAGS='--keychain ${{ steps.signing.outputs.keychain_path }}' \
+            2>&1 | tee build/archive.log
 
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -path "*/Release-iphoneos/iADB.app" -type d | head -1)
-          [ -z "$APP_PATH" ] && echo "ERROR: iADB.app not found" && exit 1
-          mkdir -p Payload && cp -r "$APP_PATH" Payload/
-          zip -r -9 iADB-unsigned.ipa Payload/ && rm -rf Payload
+      - name: Export signed IPA
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          cat > build/ExportOptions.plist <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store-connect</string>
+            <key>destination</key><string>export</string>
+            <key>teamID</key><string>$APPLE_TEAM_ID</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key><dict>
+              <key>com.iadb.app</key><string>${{ steps.signing.outputs.profile_name }}</string>
+            </dict>
+            <key>manageAppVersionAndBuildNumber</key><false/>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          PLIST
+
+          set -o pipefail
+          xcodebuild -exportArchive \
+            -archivePath build/iADB.xcarchive \
+            -exportPath build/export \
+            -exportOptionsPlist build/ExportOptions.plist \
+            2>&1 | tee build/export.log
+
+          IPA_PATH=$(find build/export -name '*.ipa' -type f -print -quit)
+          [[ -n "$IPA_PATH" ]] || { echo '::error::Signed IPA was not produced'; exit 1; }
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - name: Install App Store Connect API key
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_PRIVATE_KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY_BASE64 }}
+        run: |
+          KEY_DIRECTORY="$HOME/.appstoreconnect/private_keys"
+          mkdir -p "$KEY_DIRECTORY"
+          echo "$ASC_PRIVATE_KEY_BASE64" | base64 --decode > "$KEY_DIRECTORY/AuthKey_$ASC_KEY_ID.p8"
+          chmod 600 "$KEY_DIRECTORY/AuthKey_$ASC_KEY_ID.p8"
+
+      - name: Validate with App Store Connect
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --type ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Upload to TestFlight
+        if: github.event_name == 'push' || inputs.upload_to_testflight == true
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --type ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          security delete-keychain '${{ steps.signing.outputs.keychain_path }}' 2>/dev/null || true
+          rm -f \
+            "$RUNNER_TEMP/distribution.p12" \
+            "$RUNNER_TEMP/distribution.mobileprovision" \
+            "$RUNNER_TEMP/profile.plist"
+          rm -f \
+            "$HOME/Library/MobileDevice/Provisioning Profiles/${{ steps.signing.outputs.profile_uuid }}.mobileprovision"
+          rm -rf "$HOME/.appstoreconnect/private_keys"
+
+      - name: Upload signed artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iADB-AppStore
+          path: ${{ env.IPA_PATH }}
+          retention-days: 30
 
       - name: Create GitHub release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          files: iADB-unsigned.ipa
+          files: ${{ env.IPA_PATH }}
           generate_release_notes: true

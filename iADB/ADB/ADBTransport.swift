@@ -8,6 +8,19 @@ import os
 /// Поддерживает прямое TLS-подключение (mTLS) для _adb-tls-connect порта
 /// и plain TCP для fallback-сценариев.
 final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
+    private final class ResumeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !resumed else { return false }
+            resumed = true
+            return true
+        }
+    }
+
     static let log = Logger(subsystem: "com.iadb.app", category: "transport")
 
     private var connection: NWConnection?
@@ -48,12 +61,14 @@ final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
             tlsOptions.securityProtocolOptions,
             secIdentity
         )
-        ADBTransport.log.info("connectTLS: identity set OK, starting connection to \(host, privacy: .public):\(port, privacy: .public)")
+        ADBTransport.log.info("connectTLS: identity set OK, endpoint=\(host, privacy: .private(mask: .hash))")
 
         let parameters = NWParameters(tls: tlsOptions)
 
         let nwHost = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw ADBError.connectionFailed("Invalid port: \(port)")
+        }
         let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
         self.connection = conn
 
@@ -69,7 +84,9 @@ final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
         parameters.allowLocalEndpointReuse = true
 
         let nwHost = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw ADBError.connectionFailed("Invalid port: \(port)")
+        }
         let conn = NWConnection(host: nwHost, port: nwPort, using: parameters)
         self.connection = conn
 
@@ -77,50 +94,52 @@ final class ADBTransport: @unchecked Sendable, ADBMessageTransport {
     }
 
     private func startConnection(_ conn: NWConnection, timeout: TimeInterval) async throws {
-        return try await withCheckedThrowingContinuation { continuation in
-            var resumed = false
-            let lock = NSLock()
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { continuation in
+                let gate = ResumeGate()
 
-            func safeResume(_ block: () -> Void) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                block()
-            }
-
-            conn.stateUpdateHandler = { state in
-                switch state {
-                case .setup:
-                    ADBTransport.log.debug("NWConnection state: setup")
-                case .preparing:
-                    ADBTransport.log.debug("NWConnection state: preparing (DNS/TCP/TLS in progress)")
-                case .ready:
-                    ADBTransport.log.info("NWConnection state: ready (TLS handshake done)")
-                    safeResume { continuation.resume() }
-                case .waiting(let error):
-                    // NWConnection может зависнуть в .waiting на self-signed TLS,
-                    // но если ждём слишком долго — реальная причина в error.
-                    ADBTransport.log.error("NWConnection state: waiting, error=\(error.localizedDescription, privacy: .public)")
-                case .failed(let error):
-                    ADBTransport.log.error("NWConnection state: failed, error=\(error.localizedDescription, privacy: .public)")
-                    safeResume { continuation.resume(throwing: ADBError.connectionFailed(error.localizedDescription)) }
-                case .cancelled:
-                    ADBTransport.log.info("NWConnection state: cancelled")
-                    safeResume { continuation.resume(throwing: ADBError.connectionClosed) }
-                @unknown default:
-                    break
+                conn.stateUpdateHandler = { state in
+                    switch state {
+                    case .setup:
+                        ADBTransport.log.debug("NWConnection state: setup")
+                    case .preparing:
+                        ADBTransport.log.debug("NWConnection state: preparing (DNS/TCP/TLS in progress)")
+                    case .ready:
+                        ADBTransport.log.info("NWConnection state: ready (TLS handshake done)")
+                        if gate.claim() {
+                            continuation.resume()
+                        }
+                    case .waiting(let error):
+                        // NWConnection может зависнуть в .waiting на self-signed TLS,
+                        // но если ждём слишком долго — реальная причина в error.
+                        ADBTransport.log.error("NWConnection state: waiting, error=\(error.localizedDescription, privacy: .private(mask: .hash))")
+                    case .failed(let error):
+                        ADBTransport.log.error("NWConnection state: failed, error=\(error.localizedDescription, privacy: .private(mask: .hash))")
+                        if gate.claim() {
+                            continuation.resume(throwing: ADBError.connectionFailed(error.localizedDescription))
+                        }
+                    case .cancelled:
+                        ADBTransport.log.info("NWConnection state: cancelled")
+                        if gate.claim() {
+                            continuation.resume(throwing: ADBError.connectionClosed)
+                        }
+                    @unknown default:
+                        break
+                    }
                 }
-            }
-            conn.start(queue: self.queue)
+                conn.start(queue: self.queue)
 
-            self.queue.asyncAfter(deadline: .now() + timeout) {
-                safeResume {
+                self.queue.asyncAfter(deadline: .now() + timeout) {
+                    guard gate.claim() else { return }
                     ADBTransport.log.error("NWConnection: timeout after \(timeout, privacy: .public)s, cancelling")
                     conn.cancel()
                     continuation.resume(throwing: ADBError.timeout)
                 }
             }
+            try Task.checkCancellation()
+        } onCancel: {
+            conn.cancel()
         }
     }
 

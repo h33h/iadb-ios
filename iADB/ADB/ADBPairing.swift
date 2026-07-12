@@ -12,6 +12,43 @@ import CryptoKit
 /// 4. Exchange of encrypted PeerInfo (RSA public key)
 final class ADBPairing: @unchecked Sendable {
 
+    private final class ResumeGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var resumed = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !resumed else { return false }
+            resumed = true
+            return true
+        }
+    }
+
+    /// Keeps callback-owned mutable state out of concurrently executing closure captures.
+    /// Access stays synchronous so it is safe to use from both Network.framework callbacks
+    /// and async call sites without locking directly from an async context.
+    private final class LockedValue<Value>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Value
+
+        init(_ value: Value) {
+            self.value = value
+        }
+
+        func read() -> Value {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func write(_ newValue: Value) {
+            lock.lock()
+            value = newValue
+            lock.unlock()
+        }
+    }
+
     enum PairingError: LocalizedError {
         case invalidCode
         case connectionFailed(String)
@@ -46,24 +83,18 @@ final class ADBPairing: @unchecked Sendable {
     struct PeerInfo {
         let name: String
         let guid: String
-        let publicKey: Data
     }
 
     /// Pair with an Android device using the 6-digit pairing code.
     static func pair(host: String, port: UInt16, code: String, deviceName: String = "iADB") async throws -> PeerInfo {
-        let trimmedCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Validate pairing code: must be 6 digits
-        guard trimmedCode.count == 6,
-              trimmedCode.allSatisfy({ $0.isNumber }) else {
-            throw PairingError.invalidCode
-        }
+        let normalizedCode = try normalizedPairingCode(code)
 
         // Generate RSA key pair for ADB auth
         let crypto = try ADBCrypto()
         let publicKeyData = try crypto.adbPublicKey()
         let pubKeyAdbString = String(data: publicKeyData, encoding: .utf8)?.trimmingCharacters(in: CharacterSet(charactersIn: "\0")) ?? "<bad-utf8>"
-        ADBCrypto.log.info("PAIRING start host=\(host, privacy: .public):\(port, privacy: .public) origin=\(crypto.keyOrigin, privacy: .public) pubFingerprint=\(crypto.publicKeyFingerprint(), privacy: .public)")
-        ADBCrypto.log.info("PAIRING adb_pubkey to be sent: \(pubKeyAdbString, privacy: .public)")
+        ADBCrypto.log.info("PAIRING start endpoint=\(host, privacy: .private(mask: .hash)) origin=\(crypto.keyOrigin, privacy: .public) pubFingerprint=\(crypto.publicKeyFingerprint(), privacy: .private(mask: .hash))")
+        ADBCrypto.log.debug("PAIRING adb_pubkey=\(pubKeyAdbString, privacy: .private(mask: .hash))")
 
         // AOSP pairing requires mutual TLS — generate client identity
         let identity = try crypto.tlsIdentity()
@@ -72,10 +103,13 @@ final class ADBPairing: @unchecked Sendable {
         let (connection, queue, exportedKey) = try await connectTLS(host: host, port: port, identity: identity)
         defer { connection.cancel() }
 
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+
         // Step 2: SPAKE2 key exchange
         // AOSP appends TLS exported keying material to the pairing code:
         //   pswd = pairing_code_bytes + tls_exported_key_material(64 bytes)
-        var passwordData = Data(trimmedCode.utf8)
+        var passwordData = Data(normalizedCode.utf8)
         passwordData.append(exportedKey)
         let spake2: SPAKE2Client
         do {
@@ -122,8 +156,19 @@ final class ADBPairing: @unchecked Sendable {
         }
 
         let peer = try parsePeerInfo(decryptedPeerInfo)
-        ADBCrypto.log.info("PAIRING success host=\(host, privacy: .public):\(port, privacy: .public) deviceName=\(peer.name, privacy: .public)")
-        return peer
+        ADBCrypto.log.info("PAIRING success endpoint=\(host, privacy: .private(mask: .hash)) deviceName=\(peer.name, privacy: .private(mask: .hash))")
+            return peer
+        } onCancel: {
+            connection.cancel()
+        }
+    }
+
+    /// Android displays a decimal six-digit code. Normalize localized decimal
+    /// digits to the ASCII bytes required by the ADB pairing protocol.
+    static func normalizedPairingCode(_ code: String) throws -> String {
+        guard let normalized = LocalizedDecimalInput.asciiDigits(code),
+              normalized.count == 6 else { throw PairingError.invalidCode }
+        return normalized
     }
 
     /// Parse a QR code string from Android wireless debugging.
@@ -166,16 +211,13 @@ final class ADBPairing: @unchecked Sendable {
 
         // Capture TLS metadata for exporting keying material after handshake.
         // AOSP appends TLS EKM to the SPAKE2 password.
-        let metadataLock = NSLock()
-        var capturedMetadata: sec_protocol_metadata_t?
+        let capturedMetadata = LockedValue<sec_protocol_metadata_t?>(nil)
 
         // Accept self-signed certificates (ADB uses self-signed)
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,
             { metadata, _, completionHandler in
-                metadataLock.lock()
-                capturedMetadata = metadata
-                metadataLock.unlock()
+                capturedMetadata.write(metadata)
                 completionHandler(true)
             },
             queue
@@ -199,68 +241,62 @@ final class ADBPairing: @unchecked Sendable {
 
         let parameters = NWParameters(tls: tlsOptions)
         let nwHost = NWEndpoint.Host(host)
-        let nwPort = NWEndpoint.Port(rawValue: port)!
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            throw PairingError.connectionFailed("Invalid port: \(port)")
+        }
         let connection = NWConnection(host: nwHost, port: nwPort, using: parameters)
 
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var resumed = false
-            var lastWaitingError: NWError?
-            let lock = NSLock()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let lastWaitingError = LockedValue<NWError?>(nil)
+                let gate = ResumeGate()
 
-            func safeResume(_ block: () -> Void) {
-                lock.lock()
-                defer { lock.unlock() }
-                guard !resumed else { return }
-                resumed = true
-                block()
-            }
-
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    safeResume { continuation.resume() }
-                case .waiting(let error):
-                    // NWConnection enters .waiting during TLS with self-signed
-                    // certs before the verify block runs. Do NOT fail here —
-                    // the verify block will accept the cert and move to .ready.
-                    // Store the error so we can report it if the timeout fires.
-                    lock.lock()
-                    lastWaitingError = error
-                    lock.unlock()
-                case .failed(let error):
-                    safeResume { continuation.resume(throwing: PairingError.tlsFailed(error.localizedDescription)) }
-                case .cancelled:
-                    safeResume { continuation.resume(throwing: PairingError.connectionFailed("Cancelled")) }
-                default:
-                    break
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready:
+                        if gate.claim() {
+                            continuation.resume()
+                        }
+                    case .waiting(let error):
+                        // NWConnection enters .waiting during TLS with self-signed
+                        // certs before the verify block runs. Do NOT fail here —
+                        // the verify block will accept the cert and move to .ready.
+                        // Store the error so we can report it if the timeout fires.
+                        lastWaitingError.write(error)
+                    case .failed(let error):
+                        if gate.claim() {
+                            continuation.resume(throwing: PairingError.tlsFailed(error.localizedDescription))
+                        }
+                    case .cancelled:
+                        if gate.claim() {
+                            continuation.resume(throwing: PairingError.connectionFailed("Cancelled"))
+                        }
+                    default:
+                        break
+                    }
                 }
-            }
-            connection.start(queue: queue)
+                connection.start(queue: queue)
 
-            queue.asyncAfter(deadline: .now() + tlsTimeout) {
-                safeResume {
+                queue.asyncAfter(deadline: .now() + tlsTimeout) {
+                    guard gate.claim() else { return }
                     connection.cancel()
-                    lock.lock()
-                    let waitErr = lastWaitingError
-                    lock.unlock()
-                    if let waitErr = waitErr {
+                    if let waitError = lastWaitingError.read() {
                         continuation.resume(throwing: PairingError.connectionFailed(
-                            "Connection stuck (\(waitErr.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
+                            "Connection stuck (\(waitError.localizedDescription)). Check that Local Network permission is granted and both devices are on the same WiFi."
                         ))
                     } else {
                         continuation.resume(throwing: PairingError.timeout)
                     }
                 }
             }
+        } onCancel: {
+            connection.cancel()
         }
+        try Task.checkCancellation()
 
         // Export TLS keying material after handshake completes.
         // AOSP: pswd_.insert(pswd_.end(), exportedKeyMaterial.begin(), exportedKeyMaterial.end())
-        metadataLock.lock()
-        let metadata = capturedMetadata
-        metadataLock.unlock()
-
-        guard let metadata = metadata else {
+        guard let metadata = capturedMetadata.read() else {
             connection.cancel()
             throw PairingError.tlsFailed("TLS metadata not available for key export")
         }
@@ -278,7 +314,14 @@ final class ADBPairing: @unchecked Sendable {
             throw PairingError.tlsFailed("Failed to export TLS keying material")
         }
 
-        let ekm = ekmDispatchData as AnyObject as! NSData as Data
+        let dispatchData = ekmDispatchData as DispatchData
+        let ekm = dispatchData.withUnsafeBytes { (pointer: UnsafePointer<UInt8>) in
+            Data(bytes: pointer, count: dispatchData.count)
+        }
+        guard ekm.count == exportedKeySize else {
+            connection.cancel()
+            throw PairingError.tlsFailed("Unexpected TLS keying material length: \(ekm.count)")
+        }
         return (connection, queue, ekm)
     }
 
@@ -294,25 +337,24 @@ final class ADBPairing: @unchecked Sendable {
     }
 
     /// Parse decrypted PeerInfo (8192 bytes).
-    private static func parsePeerInfo(_ data: Data) throws -> PeerInfo {
-        guard data.count >= 2 else {
-            throw PairingError.protocolError("PeerInfo too short")
+    static func parsePeerInfo(_ data: Data) throws -> PeerInfo {
+        guard data.count == peerInfoSize else {
+            throw PairingError.protocolError("PeerInfo must be exactly \(peerInfoSize) bytes")
         }
-
-        let keyData = data.dropFirst(1)
-        // Find null terminator in key data
-        let nullIdx = keyData.firstIndex(of: 0) ?? keyData.endIndex
-        let keySlice = keyData[keyData.startIndex..<nullIdx]
-        let keyString = String(data: keySlice, encoding: .utf8) ?? ""
-
-        // Extract device name from the key string (after the base64 key)
-        let name = keyString.components(separatedBy: " ").last ?? "Android Device"
-
-        return PeerInfo(
-            name: name.isEmpty ? "Android Device" : name,
-            guid: "",
-            publicKey: Data(keySlice)
-        )
+        // AOSP's pairing server sends ADB_DEVICE_GUID (1), not an RSA key.
+        guard data[0] == 1 else {
+            throw PairingError.protocolError("Unexpected PeerInfo type: \(data[0])")
+        }
+        let guidData = data.dropFirst()
+        guard let nullIndex = guidData.firstIndex(of: 0), nullIndex > guidData.startIndex else {
+            throw PairingError.protocolError("Device GUID is missing or not terminated")
+        }
+        let encodedGUID = guidData[guidData.startIndex..<nullIndex]
+        guard let guid = String(data: encodedGUID, encoding: .utf8),
+              !guid.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw PairingError.protocolError("Device GUID is not valid UTF-8")
+        }
+        return PeerInfo(name: "Android Device", guid: guid)
     }
 
     // MARK: - Message Framing
@@ -371,31 +413,32 @@ final class ADBPairing: @unchecked Sendable {
         while buffer.count < count {
             let remaining = count - buffer.count
             let chunk: Data = try await withCheckedThrowingContinuation { continuation in
-                var resumed = false
-                let lock = NSLock()
-
-                func safeResume(_ block: () -> Void) {
-                    lock.lock()
-                    defer { lock.unlock() }
-                    guard !resumed else { return }
-                    resumed = true
-                    block()
-                }
+                let gate = ResumeGate()
 
                 connection.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
                     if let error = error {
-                        safeResume { continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription)) }
+                        if gate.claim() {
+                            continuation.resume(throwing: PairingError.connectionFailed(error.localizedDescription))
+                        }
                     } else if let data = data, !data.isEmpty {
-                        safeResume { continuation.resume(returning: data) }
+                        if gate.claim() {
+                            continuation.resume(returning: data)
+                        }
                     } else if isComplete {
-                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("Connection closed by device")) }
+                        if gate.claim() {
+                            continuation.resume(throwing: PairingError.connectionFailed("Connection closed by device"))
+                        }
                     } else {
-                        safeResume { continuation.resume(throwing: PairingError.connectionFailed("No data received")) }
+                        if gate.claim() {
+                            continuation.resume(throwing: PairingError.connectionFailed("No data received"))
+                        }
                     }
                 }
 
                 queue.asyncAfter(deadline: .now() + receiveTimeout) {
-                    safeResume { continuation.resume(throwing: PairingError.timeout) }
+                    if gate.claim() {
+                        continuation.resume(throwing: PairingError.timeout)
+                    }
                 }
             }
             buffer.append(chunk)

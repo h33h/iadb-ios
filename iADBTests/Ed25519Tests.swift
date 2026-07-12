@@ -233,16 +233,6 @@ final class Ed25519Tests: XCTestCase {
     }
 
     func testInvalidPointDecode() {
-        // All zeros is not a valid point; identity is encoded as [1, 0...0].
-        let bad = [UInt8](repeating: 0, count: 32)
-        var bad2 = [UInt8](repeating: 0xFF, count: 32)
-        bad2[31] = 0x7F
-        let bad3: [UInt8] = [
-            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-        ]
         XCTAssertNil(EdPoint.decode([UInt8](repeating: 0, count: 31)))
         XCTAssertNil(EdPoint.decode([UInt8](repeating: 0, count: 33)))
     }

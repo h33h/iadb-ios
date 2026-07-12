@@ -47,6 +47,10 @@ struct AppsView: View {
                                 .font(.subheadline)
                         }
                         .buttonStyle(.bordered)
+                        .disabled(
+                            store.isInstalling || store.activeOperation != nil ||
+                            store.isLoading || store.isLoadingDetail
+                        )
                     }
                 }
                 .padding(.horizontal)
@@ -61,13 +65,47 @@ struct AppsView: View {
                 }
 
                 if store.isInstalling {
-                    StatusBannerView(style: .progress, message: store.installProgress, showsProgress: true)
+                    StatusBannerView(
+                        style: .progress,
+                        message: store.installProgress,
+                        showsProgress: true,
+                        actionTitle: "Cancel",
+                        onAction: { store.send(.cancelInstall) }
+                    )
                         .padding(.horizontal)
                         .padding(.bottom, 8)
                 }
 
+                if let operation = store.activeOperation {
+                    StatusBannerView(
+                        style: .progress,
+                        message: operation.message,
+                        showsProgress: true,
+                        actionTitle: "Cancel",
+                        onAction: { store.send(.cancelOperation) }
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                }
+
+                if store.isLoadingDetail {
+                    StatusBannerView(
+                        style: .progress,
+                        message: "Loading app details...",
+                        showsProgress: true
+                    )
+                    .padding(.horizontal)
+                    .padding(.bottom, 8)
+                }
+
                 if let error = store.errorMessage {
-                    StatusBannerView(style: .error, message: error)
+                    StatusBannerView(
+                        style: .error,
+                        message: error,
+                        actionTitle: store.apps.isEmpty ? "Retry" : nil,
+                        onDismiss: { store.send(.dismissError) },
+                        onAction: store.apps.isEmpty ? { store.send(.loadApps) } : nil
+                    )
                     .padding(.horizontal)
                     .padding(.bottom, 8)
                 }
@@ -77,6 +115,25 @@ struct AppsView: View {
                     Spacer()
                     ProgressView("Loading packages...")
                     Spacer()
+                } else if store.filteredApps.isEmpty {
+                    ContentUnavailableView {
+                        Label(
+                            store.searchText.isEmpty ? "No Apps Found" : "No Matching Apps",
+                            systemImage: store.searchText.isEmpty ? "app.dashed" : "magnifyingglass"
+                        )
+                    } description: {
+                        Text(store.searchText.isEmpty
+                             ? "No packages match the selected filter."
+                             : "Try a different package name or clear the search.")
+                    } actions: {
+                        if store.searchText.isEmpty {
+                            Button("Reload") { store.send(.loadApps) }
+                        } else {
+                            Button("Clear Search") {
+                                store.send(.binding(.set(\.searchText, "")))
+                            }
+                        }
+                    }
                 } else {
                     List(store.filteredApps) { app in
                         AppRow(
@@ -84,6 +141,10 @@ struct AppsView: View {
                             onLaunch: { store.send(.launchApp(app)) },
                             onDetails: { store.send(.getAppDetail(app)) }
                         )
+                            .disabled(
+                                store.activeOperation != nil || store.isInstalling ||
+                                store.isLoadingDetail
+                            )
                             .contentShape(Rectangle())
                             .contextMenu {
                                 Button {
@@ -138,6 +199,11 @@ struct AppsView: View {
                     } label: {
                         Image(systemName: "arrow.clockwise")
                     }
+                    .accessibilityLabel("Reload apps")
+                    .disabled(
+                        store.isLoading || store.isInstalling ||
+                        store.activeOperation != nil || store.isLoadingDetail
+                    )
                 }
             }
             .confirmationDialog("Uninstall App?", isPresented: $showingUninstallConfirm) {
@@ -173,12 +239,12 @@ struct AppsView: View {
                 Text("Stop \(appToForceStop?.packageName ?? "")? Unsaved work in the app may be lost.")
             }
             .fileImporter(isPresented: $showingImportPicker, allowedContentTypes: [UTType(filenameExtension: "apk") ?? .data], allowsMultipleSelection: false) { result in
-                if case .success(let urls) = result, let url = urls.first {
-                    guard url.startAccessingSecurityScopedResource() else { return }
-                    defer { url.stopAccessingSecurityScopedResource() }
-                    if let data = try? Data(contentsOf: url) {
-                        store.send(.installAPK(data: data, fileName: url.lastPathComponent))
-                    }
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    store.send(.installAPKFile(url: url, fileName: url.lastPathComponent))
+                case .failure(let error):
+                    store.send(.importFailed("Could not import the APK: \(error.localizedDescription)"))
                 }
             }
             .sheet(isPresented: $store.showingAppDetail) {
@@ -225,12 +291,16 @@ struct AppRow: View {
                     .font(.title3)
             }
             .buttonStyle(.plain)
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("Launch \(app.displayName)")
 
             Button(action: onDetails) {
                 Image(systemName: "info.circle")
                     .font(.title3)
             }
             .buttonStyle(.plain)
+            .frame(minWidth: 44, minHeight: 44)
+            .accessibilityLabel("Show details for \(app.displayName)")
         }
         .padding(.vertical, 2)
     }

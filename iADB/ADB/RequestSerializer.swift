@@ -7,15 +7,20 @@ import Foundation
 actor RequestSerializer {
     private var lastTask: Task<Void, Never>?
 
-    func run<T: Sendable>(_ op: @Sendable @escaping () async throws -> T) async throws -> T {
+    func run<T: Sendable>(_ operation: @Sendable @escaping () async throws -> T) async throws -> T {
         let previous = lastTask
         let task = Task<T, Error> {
             _ = await previous?.value
-            return try await op()
+            try Task.checkCancellation()
+            return try await operation()
         }
         lastTask = Task {
             _ = try? await task.value
         }
-        return try await task.value
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 }

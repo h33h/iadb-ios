@@ -6,6 +6,27 @@ import Testing
 @MainActor
 struct ShellFeatureTests {
     @Test
+    func outputAndHistoryAreBoundedBeforePersistence() {
+        let output = String(repeating: "x", count: 32)
+        let truncated = ShellFeature.truncatedOutput(output, byteLimit: 10)
+        #expect(truncated.hasPrefix(String(repeating: "x", count: 10)))
+        #expect(truncated.contains("truncated"))
+
+        let entries = (0..<3).map { index in
+            ShellHistoryEntry(
+                command: "c\(index)",
+                output: String(repeating: "y", count: 8),
+                timestamp: Date(),
+                isError: false
+            )
+        }
+        #expect(ShellFeature.retainedHistory(entries, byteLimit: 15).count == 1)
+
+        let pins = [" df -h ", "df -h", "", "getprop", "logcat"]
+        #expect(ShellFeature.retainedPinnedCommands(pins, countLimit: 2, byteLimit: 20) == ["df -h", "getprop"])
+    }
+
+    @Test
     func executeCommandSuccess() async {
         let store = TestStore(
             initialState: ShellFeature.State(commandInput: "ls /sdcard")
@@ -105,6 +126,7 @@ struct ShellFeatureTests {
 
         await store.send(.clearHistory) {
             $0.history = []
+            $0.persistenceGeneration = 1
         }
     }
 
@@ -117,6 +139,28 @@ struct ShellFeatureTests {
         }
 
         await store.send(.executeCommand)
+    }
+
+    @Test
+    func cancelExecutionRestoresInteractiveState() async {
+        let store = TestStore(
+            initialState: ShellFeature.State(commandInput: "logcat")
+        ) {
+            ShellFeature()
+        } withDependencies: {
+            $0.adbClient.shell = { _ in
+                try await Task.sleep(for: .seconds(60))
+                return ""
+            }
+        }
+
+        await store.send(.executeCommand) {
+            $0.commandInput = ""
+            $0.isExecuting = true
+        }
+        await store.send(.cancelExecution) {
+            $0.isExecuting = false
+        }
     }
 
     @Test
@@ -177,10 +221,35 @@ struct ShellFeatureTests {
 
         await store.send(.togglePinnedCommand("df -h")) {
             $0.pinnedCommands = ["df -h"]
+            $0.persistenceGeneration = 1
         }
 
         await store.send(.togglePinnedCommand("df -h")) {
             $0.pinnedCommands = []
+            $0.persistenceGeneration = 2
+        }
+    }
+
+    @Test
+    func persistenceFailureIsVisible() async {
+        struct DiskError: LocalizedError {
+            var errorDescription: String? { "disk is full" }
+        }
+        let store = TestStore(initialState: ShellFeature.State()) {
+            ShellFeature()
+        } withDependencies: {
+            $0.shellPersistenceClient.save = { _ in throw DiskError() }
+        }
+
+        await store.send(.togglePinnedCommand("df -h")) {
+            $0.pinnedCommands = ["df -h"]
+            $0.persistenceGeneration = 1
+        }
+        await store.receive(\.persistenceFailed) {
+            $0.errorMessage = "Could not save shell history: disk is full"
+        }
+        await store.send(.dismissError) {
+            $0.errorMessage = nil
         }
     }
 
@@ -193,5 +262,35 @@ struct ShellFeatureTests {
         await store.send(.useHistoryCommand("pm list packages")) {
             $0.commandInput = "pm list packages"
         }
+    }
+
+    @Test
+    func persistenceWriterRejectsSnapshotThatArrivesOutOfOrder() async throws {
+        let recorder = ShellPersistenceRecorder()
+        let client = ShellPersistenceClient(
+            load: { ShellPersistenceState(history: [], pinnedCommands: []) },
+            save: { recorder.append($0) }
+        )
+        let writer = ShellPersistenceWriter()
+        let latest = ShellPersistenceState(history: [], pinnedCommands: ["latest"])
+        let stale = ShellPersistenceState(history: [], pinnedCommands: ["stale"])
+
+        try await writer.save(generation: 2, state: latest, client: client)
+        try await writer.save(generation: 1, state: stale, client: client)
+
+        #expect(recorder.values == [latest])
+    }
+}
+
+private final class ShellPersistenceRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [ShellPersistenceState] = []
+
+    var values: [ShellPersistenceState] {
+        lock.withLock { storage }
+    }
+
+    func append(_ state: ShellPersistenceState) {
+        lock.withLock { storage.append(state) }
     }
 }

@@ -43,6 +43,7 @@ final class FileEntryTests: XCTestCase {
         XCTAssertEqual(entry?.name, "link")
         XCTAssertTrue(entry!.isSymlink)
         XCTAssertEqual(entry?.symlinkTarget, "/data/actual")
+        XCTAssertTrue(entry!.isNavigableDirectory)
     }
 
     func testParseDotEntryIsIgnored() {
@@ -180,6 +181,12 @@ final class FileEntryTests: XCTestCase {
 
     func testIconUnknown() {
         XCTAssertEqual(makeEntry(name: "file.xyz").iconName, "doc")
+    }
+
+    func testDisplayNameEscapesControlCharactersWithoutChangingRemoteName() {
+        let entry = makeEntry(name: "line\nbreak.txt")
+        XCTAssertEqual(entry.name, "line\nbreak.txt")
+        XCTAssertEqual(entry.displayName, "line\\u{000A}break.txt")
     }
 
     // MARK: - Helpers

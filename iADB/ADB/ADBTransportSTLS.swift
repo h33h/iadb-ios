@@ -2,72 +2,164 @@ import Foundation
 import Security
 import os
 
-/// Транспорт для `_adb-tls-connect` порта по STLS-flow:
-/// plain TCP → plaintext CNXN → server STLS → client STLS → TLS upgrade → данные.
-/// Использует URLSessionStreamTask, потому что NWConnection не умеет TLS-upgrade
-/// на уже установленном сокете.
-final class ADBTransportSTLS: NSObject, @unchecked Sendable, ADBMessageTransport, URLSessionDelegate, URLSessionTaskDelegate, URLSessionStreamDelegate {
+private final class ADBURLSessionDelegateProxy: NSObject,
+    URLSessionDelegate,
+    URLSessionTaskDelegate,
+    URLSessionStreamDelegate {
+    weak var owner: ADBTransportSTLS?
+
+    init(owner: ADBTransportSTLS) {
+        self.owner = owner
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        owner?.handleChallenge(challenge, completionHandler: completionHandler)
+            ?? completionHandler(.cancelAuthenticationChallenge, nil)
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        owner?.handleChallenge(challenge, completionHandler: completionHandler)
+            ?? completionHandler(.cancelAuthenticationChallenge, nil)
+    }
+}
+
+actor ADBTransportWriteSerializer {
+    private var tail: Task<Void, Never>?
+
+    func run(_ operation: @escaping @Sendable () async throws -> Void) async throws {
+        let previous = tail
+        let task = Task<Void, Error> {
+            _ = await previous?.value
+            try Task.checkCancellation()
+            try await operation()
+        }
+        tail = Task { _ = try? await task.value }
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+}
+
+/// Transport for the `_adb-tls-connect` STLS flow:
+/// plain TCP → plaintext CNXN → STLS exchange → TLS upgrade → ADB packets.
+final class ADBTransportSTLS: NSObject, @unchecked Sendable, ADBClientTransport {
     static let log = Logger(subsystem: "com.iadb.app", category: "stls")
 
-    private var session: URLSession!
+    private var session: URLSession?
     private var task: URLSessionStreamTask?
     private let identity: SecIdentity
+    private lazy var delegateProxy = ADBURLSessionDelegateProxy(owner: self)
+    private let stateLock = NSLock()
+    private let writeSerializer = ADBTransportWriteSerializer()
     private var receiveBuffer = Data()
-    private let bufferLock = NSLock()
+    private var connectionAlive = false
     private(set) var isUpgraded = false
 
     var skipChecksum = false
 
     var isConnected: Bool {
-        guard let task = task else { return false }
-        return task.state == .running
+        stateLock.withLock { connectionAlive && task?.state == .running }
     }
 
     init(identity: SecIdentity) {
         self.identity = identity
         super.init()
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        config.timeoutIntervalForResource = 60
-        self.session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    deinit {
+        let resources = stateLock.withLock { (task, session) }
+        resources.0?.cancel()
+        resources.1?.invalidateAndCancel()
     }
 
     func connect(host: String, port: UInt16, timeout: TimeInterval = 15) async throws {
+        disconnect()
+        try Task.checkCancellation()
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = max(timeout, 60)
+        let session = URLSession(
+            configuration: configuration,
+            delegate: delegateProxy,
+            delegateQueue: nil
+        )
         let task = session.streamTask(withHostName: host, port: Int(port))
-        self.task = task
+        stateLock.withLock {
+            self.session = session
+            self.task = task
+            self.connectionAlive = true
+        }
         task.resume()
-        ADBTransportSTLS.log.info("STLS: TCP connect to \(host, privacy: .public):\(port, privacy: .public)")
+        Self.log.info("STLS: TCP connect endpoint=\(host, privacy: .private(mask: .hash))")
     }
 
-    /// TLS upgrade на уже установленном TCP. Сертификат клиента отдаётся через
-    /// URLAuthenticationChallenge (см. urlSession:task:didReceive:completionHandler:).
+    /// Upgrade the already-open TCP stream to mutual TLS.
     func upgradeToTLS() async throws {
-        guard let task = task else { throw ADBError.notConnected }
-        ADBTransportSTLS.log.info("STLS: starting TLS upgrade")
+        guard let task = stateLock.withLock({ task }) else {
+            throw ADBError.notConnected
+        }
+        try Task.checkCancellation()
+        Self.log.info("STLS: starting TLS upgrade")
         task.startSecureConnection()
-        isUpgraded = true
-        skipChecksum = true
-        // Маленький запас на handshake. Реально обмен пойдёт при первом read/write.
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        stateLock.withLock {
+            isUpgraded = true
+            skipChecksum = true
+        }
+        // URLSessionStreamTask has no async TLS-ready callback. The first
+        // encrypted read/write still drives and validates the handshake.
+        try await Task.sleep(nanoseconds: 50_000_000)
     }
 
     func disconnect() {
-        task?.cancel()
-        task = nil
-        receiveBuffer.removeAll()
-        skipChecksum = false
-        isUpgraded = false
+        let resources = stateLock.withLock { () -> (URLSessionStreamTask?, URLSession?) in
+            let resources = (task, session)
+            task = nil
+            session = nil
+            receiveBuffer.removeAll(keepingCapacity: false)
+            connectionAlive = false
+            skipChecksum = false
+            isUpgraded = false
+            return resources
+        }
+        resources.0?.cancel()
+        resources.1?.invalidateAndCancel()
     }
 
     func send(_ data: Data) async throws {
-        guard let task = task else { throw ADBError.notConnected }
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            task.write(data, timeout: 30) { error in
-                if let error = error {
-                    cont.resume(throwing: ADBError.sendFailed(error.localizedDescription))
-                } else {
-                    cont.resume()
+        guard let task = stateLock.withLock({ task }) else {
+            throw ADBError.notConnected
+        }
+
+        try await writeSerializer.run {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    task.write(data, timeout: 30) { error in
+                        if let error {
+                            self.markConnectionFailed()
+                            if (error as NSError).code == NSURLErrorCancelled {
+                                continuation.resume(throwing: CancellationError())
+                            } else {
+                                continuation.resume(throwing: ADBError.sendFailed(error.localizedDescription))
+                            }
+                        } else {
+                            continuation.resume()
+                        }
+                    }
                 }
+            } onCancel: {
+                task.cancel()
             }
         }
     }
@@ -77,48 +169,56 @@ final class ADBTransportSTLS: NSObject, @unchecked Sendable, ADBMessageTransport
     }
 
     func receiveMessage(timeout: TimeInterval? = nil) async throws -> ADBMessage {
-        if let timeout = timeout {
-            return try await withTimeout(timeout) {
-                try await self._receiveMessage()
+        do {
+            if let timeout {
+                return try await withTimeout(timeout) {
+                    try await self.receiveMessageWithoutTimeout()
+                }
             }
+            return try await receiveMessageWithoutTimeout()
+        } catch {
+            if !(error is CancellationError) {
+                // A framing/checksum/read failure poisons the multiplexed byte
+                // stream. Make health monitoring observe the loss instead of
+                // leaving the app in a permanently unusable “Connected” state.
+                markConnectionFailed()
+            }
+            throw error
         }
-        return try await _receiveMessage()
     }
 
-    private func _receiveMessage() async throws -> ADBMessage {
+    private func receiveMessageWithoutTimeout() async throws -> ADBMessage {
         let headerData = try await receive(exactly: ADBMessage.headerSize)
 
         guard let header = ADBMessage.parseHeader(from: headerData) else {
             throw ADBError.protocolError("Invalid message header")
         }
 
-        let cmdAscii = String(bytes: [
+        let commandName = String(bytes: [
             UInt8(header.command & 0xFF),
             UInt8((header.command >> 8) & 0xFF),
             UInt8((header.command >> 16) & 0xFF),
             UInt8((header.command >> 24) & 0xFF)
         ], encoding: .ascii) ?? "?"
-        ADBTransportSTLS.log.info("STLS hdr cmd=\(cmdAscii, privacy: .public) arg0=\(header.arg0, privacy: .public) arg1=\(header.arg1, privacy: .public) dataLen=\(header.dataLength, privacy: .public)")
+        Self.log.debug(
+            "STLS header command=\(commandName, privacy: .private) length=\(header.dataLength, privacy: .private)"
+        )
 
         guard header.command ^ header.magic == 0xFFFFFFFF else {
-            let hex = headerData.map { String(format: "%02x", $0) }.joined()
-            ADBTransportSTLS.log.error("STLS bad header magic: \(hex, privacy: .public)")
+            Self.log.error("STLS received a header with invalid magic")
             throw ADBError.protocolError(
-                "Bad header magic: cmd=\(String(format: "0x%08X", header.command)) magic=\(String(format: "0x%08X", header.magic))"
+                "Bad header magic: cmd=\(String(format: "0x%08X", header.command)) "
+                    + "magic=\(String(format: "0x%08X", header.magic))"
             )
         }
 
         var payload = Data()
         if header.dataLength > 0 {
             guard header.dataLength <= ADBMessage.maxPayload else {
-                let hex = headerData.map { String(format: "%02x", $0) }.joined()
-                ADBTransportSTLS.log.error("STLS payload too large dataLength=\(header.dataLength, privacy: .public) header=\(hex, privacy: .public)")
+                Self.log.error("STLS payload exceeds negotiated maximum")
                 throw ADBError.protocolError("Payload too large: \(header.dataLength)")
             }
-            ADBTransportSTLS.log.info("STLS reading payload \(header.dataLength, privacy: .public) bytes")
             payload = try await receive(exactly: Int(header.dataLength))
-            let preview = payload.prefix(32).map { String(format: "%02x", $0) }.joined()
-            ADBTransportSTLS.log.info("STLS payload[0..\(min(32, payload.count), privacy: .public)]=\(preview, privacy: .public)")
         }
 
         let message = ADBMessage(
@@ -131,109 +231,121 @@ final class ADBTransportSTLS: NSObject, @unchecked Sendable, ADBMessageTransport
             data: payload
         )
 
-        guard message.isValid(skipChecksum: skipChecksum) else {
+        let shouldSkipChecksum = stateLock.withLock { skipChecksum }
+        guard message.isValid(skipChecksum: shouldSkipChecksum) else {
             throw ADBError.protocolError("Message validation failed")
         }
 
         if message.commandType == .connect && message.arg0 >= ADBMessage.version {
-            skipChecksum = true
+            stateLock.withLock { skipChecksum = true }
         }
-
         return message
     }
 
     private func receive(exactly count: Int) async throws -> Data {
-        guard let task = task else { throw ADBError.notConnected }
+        guard count >= 0 else {
+            throw ADBError.protocolError("Negative receive length")
+        }
 
         while true {
-            bufferLock.lock()
-            if receiveBuffer.count >= count {
-                // Свежая копия (Data со start=0), чтобы parseHeader не натыкался
-                // на slice с нестандартным baseAddress.
-                let chunk = Data(receiveBuffer.prefix(count))
+            try Task.checkCancellation()
+            if let buffered = stateLock.withLock({ () -> Data? in
+                guard receiveBuffer.count >= count else { return nil }
+                let result = Data(receiveBuffer.prefix(count))
                 receiveBuffer.removeFirst(count)
-                bufferLock.unlock()
-                return chunk
+                return result
+            }) {
+                return buffered
             }
-            bufferLock.unlock()
 
-            let result: (data: Data?, atEOF: Bool) = try await withCheckedThrowingContinuation { cont in
-                task.readData(ofMinLength: 1, maxLength: 65536, timeout: 30) { data, atEOF, error in
-                    if let error = error {
-                        cont.resume(throwing: ADBError.receiveFailed(error.localizedDescription))
-                    } else {
-                        cont.resume(returning: (data, atEOF))
+            guard let task = stateLock.withLock({ task }) else {
+                throw ADBError.notConnected
+            }
+            let result: (data: Data?, atEOF: Bool) = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    // Zero disables URLSessionStreamTask's per-read idle timeout.
+                    // Callers that need a deadline use receiveMessage(timeout:).
+                    task.readData(ofMinLength: 1, maxLength: 65_536, timeout: 0) { data, atEOF, error in
+                        if let error {
+                            self.markConnectionFailed()
+                            if (error as NSError).code == NSURLErrorCancelled {
+                                continuation.resume(throwing: CancellationError())
+                            } else {
+                                continuation.resume(throwing: ADBError.receiveFailed(error.localizedDescription))
+                            }
+                        } else {
+                            continuation.resume(returning: (data, atEOF))
+                        }
                     }
                 }
+            } onCancel: {
+                // URLSessionStreamTask has no API to cancel one pending read.
+                // Cancelling the socket is the only way to release its callback.
+                task.cancel()
             }
 
-            if let chunk = result.data, !chunk.isEmpty {
-                bufferLock.lock()
-                receiveBuffer.append(chunk)
-                let bufLen = receiveBuffer.count
-                bufferLock.unlock()
-                ADBTransportSTLS.log.debug("STLS read +\(chunk.count, privacy: .public) bytes (buf=\(bufLen, privacy: .public), need=\(count, privacy: .public))")
+            if let data = result.data, !data.isEmpty {
+                stateLock.withLock { receiveBuffer.append(data) }
             }
-
             if result.atEOF {
-                bufferLock.lock()
-                let haveEnough = receiveBuffer.count >= count
-                bufferLock.unlock()
-                if !haveEnough {
+                let hasEnoughData = stateLock.withLock { receiveBuffer.count >= count }
+                if !hasEnoughData {
+                    markConnectionFailed()
                     throw ADBError.connectionClosed
                 }
             }
         }
     }
 
-    private func withTimeout<T: Sendable>(_ timeout: TimeInterval, operation: @escaping @Sendable () async throws -> T) async throws -> T {
-        try await withThrowingTaskGroup(of: T.self) { group in
-            group.addTask {
-                try await operation()
-            }
+    private func markConnectionFailed() {
+        stateLock.withLock { connectionAlive = false }
+    }
+
+    private func withTimeout<T: Sendable>(
+        _ timeout: TimeInterval,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard timeout > 0 else { throw ADBError.timeout }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 throw ADBError.timeout
             }
+            defer { group.cancelAll() }
             guard let result = try await group.next() else {
                 throw ADBError.timeout
             }
-            group.cancelAll()
             return result
         }
     }
 
-    // MARK: - URLSessionDelegate
-
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        handleChallenge(challenge, completionHandler: completionHandler)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        handleChallenge(challenge, completionHandler: completionHandler)
-    }
-
-    private func handleChallenge(_ challenge: URLAuthenticationChallenge, completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+    fileprivate func handleChallenge(
+        _ challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
         let method = challenge.protectionSpace.authenticationMethod
-        ADBTransportSTLS.log.info("STLS: auth challenge method=\(method, privacy: .public)")
+        Self.log.debug("STLS authentication challenge: \(method, privacy: .private)")
 
         switch method {
         case NSURLAuthenticationMethodServerTrust:
-            // Принимаем любой server cert (adbd использует self-signed).
+            // adbd uses a self-signed device certificate.
             if let trust = challenge.protectionSpace.serverTrust {
                 completionHandler(.useCredential, URLCredential(trust: trust))
             } else {
-                completionHandler(.performDefaultHandling, nil)
+                completionHandler(.cancelAuthenticationChallenge, nil)
             }
         case NSURLAuthenticationMethodClientCertificate:
-            var cert: SecCertificate?
-            SecIdentityCopyCertificate(identity, &cert)
-            guard let cert = cert else {
+            var certificate: SecCertificate?
+            SecIdentityCopyCertificate(identity, &certificate)
+            guard let certificate else {
                 completionHandler(.cancelAuthenticationChallenge, nil)
                 return
             }
-            let credential = URLCredential(identity: identity, certificates: [cert], persistence: .none)
-            completionHandler(.useCredential, credential)
+            completionHandler(
+                .useCredential,
+                URLCredential(identity: identity, certificates: [certificate], persistence: .none)
+            )
         default:
             completionHandler(.performDefaultHandling, nil)
         }

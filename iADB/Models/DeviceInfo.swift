@@ -75,19 +75,59 @@ struct DiscoveredDevice: Identifiable, Equatable {
 struct PairedDevice: Identifiable, Codable, Equatable {
     let id: UUID
     var name: String
-    var publicKey: Data
+    var guid: String
     var lastHost: String
     /// Persistent mDNS service name ("adb-R8YL10CLZCY-lKlRMT") — стабильный hash
     /// device cert. Матчим именно по нему, потому что host/port меняются при
     /// toggle wireless debug.
     var serviceName: String?
 
-    init(name: String, publicKey: Data, lastHost: String, serviceName: String? = nil) {
-        self.id = UUID()
+    init(id: UUID = UUID(), name: String, guid: String, lastHost: String, serviceName: String? = nil) {
+        self.id = id
         self.name = name
-        self.publicKey = publicKey
+        self.guid = guid
         self.lastHost = lastHost
         self.serviceName = serviceName
+    }
+
+    /// Source compatibility for data created before the pairing field was
+    /// correctly identified as Android's device GUID.
+    init(name: String, publicKey: Data, lastHost: String, serviceName: String? = nil) {
+        self.init(
+            name: name,
+            guid: String(data: publicKey, encoding: .utf8) ?? publicKey.base64EncodedString(),
+            lastHost: lastHost,
+            serviceName: serviceName
+        )
+    }
+
+    var publicKey: Data { Data(guid.utf8) }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, guid, publicKey, lastHost, serviceName
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        lastHost = try container.decode(String.self, forKey: .lastHost)
+        serviceName = try container.decodeIfPresent(String.self, forKey: .serviceName)
+        if let storedGUID = try container.decodeIfPresent(String.self, forKey: .guid) {
+            guid = storedGUID
+        } else {
+            let legacy = try container.decodeIfPresent(Data.self, forKey: .publicKey) ?? Data()
+            guid = String(data: legacy, encoding: .utf8) ?? legacy.base64EncodedString()
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(guid, forKey: .guid)
+        try container.encode(lastHost, forKey: .lastHost)
+        try container.encodeIfPresent(serviceName, forKey: .serviceName)
     }
 
     var displayName: String {

@@ -34,7 +34,7 @@ extension PairedDevicesClient: DependencyKey {
 
     static var testValue: Self {
         Self(
-            load: unimplemented("PairedDevicesClient.load"),
+            load: unimplemented("PairedDevicesClient.load", placeholder: []),
             save: unimplemented("PairedDevicesClient.save")
         )
     }

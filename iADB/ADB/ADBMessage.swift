@@ -123,8 +123,8 @@ struct ADBMessage {
 
     // MARK: - Factory Methods
 
-    static func connectMessage(banner: String = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,sendrecv_v2_dry_run_send,openscreen_mdns") -> ADBMessage {
-        let bannerData = banner.data(using: .utf8)! + Data([0])
+    static func connectMessage(banner: String = "host::features=shell_v2,stat_v2,ls_v2") -> ADBMessage {
+        let bannerData = Data(banner.utf8) + Data([0])
         return ADBMessage(command: .connect, arg0: version, arg1: maxPayload, data: bannerData)
     }
 
@@ -141,7 +141,7 @@ struct ADBMessage {
     }
 
     static func openMessage(localId: UInt32, destination: String) -> ADBMessage {
-        let destData = destination.data(using: .utf8)! + Data([0])
+        let destData = Data(destination.utf8) + Data([0])
         return ADBMessage(command: .open, arg0: localId, arg1: 0, data: destData)
     }
 
