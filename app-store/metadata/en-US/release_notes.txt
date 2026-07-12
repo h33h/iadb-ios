@@ -1,0 +1,1 @@
+Initial release with wireless pairing, device details, file and app management, ADB shell, Logcat, and screenshot tools.

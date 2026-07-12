@@ -18,7 +18,7 @@ iADB asks for add-only Photos access when you choose Save to Photos. The app can
 
 ## Deleting data
 
-Use Forget for one saved Android device, or Reset ADB Identity under Help to remove the Keychain identity and every saved device before deleting iADB. Clear Shell history, Logcat presets, and saved screenshots from their screens. Deleting iADB removes its app-container data, but the Keychain identity may otherwise remain. Remove iADB from Android's Wireless debugging paired devices to revoke trust there.
+Use Forget for one saved Android device, or Reset ADB Identity in Settings to remove the Keychain identity and every saved device before deleting iADB. Clear Shell history, Logcat presets, and saved screenshots from their screens. Deleting iADB removes its app-container data, but the Keychain identity may otherwise remain. Remove iADB from Android's Wireless debugging paired devices to revoke trust there.
 
 ## Third-party code
 

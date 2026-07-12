@@ -2,21 +2,18 @@ import SwiftUI
 import ComposableArchitecture
 import UIKit
 
-/// Root tab view — composes all feature stores
+/// Five task-oriented roots keep navigation predictable on iPhone and iPad.
 struct MainTabView: View {
     @Bindable var store: StoreOf<AppFeature>
 
     var body: some View {
-        TabView(selection: $store.selectedTab.sending(\.selectTab)) {
-            ConnectionView(store: store.scope(state: \.connection, action: \.connection))
+        TabView(selection: visibleTabBinding) {
+            DeviceHubView(
+                connectionStore: store.scope(state: \.connection, action: \.connection),
+                deviceStore: store.scope(state: \.device, action: \.device)
+            )
                 .tabItem {
-                    Label("Connect", systemImage: "wifi")
-                }
-                .tag(AppFeature.Tab.connection)
-
-            DeviceInfoView(store: store.scope(state: \.device, action: \.device))
-                .tabItem {
-                    Label("Device", systemImage: "iphone")
+                    Label("Device", systemImage: "smartphone")
                 }
                 .tag(AppFeature.Tab.device)
 
@@ -32,23 +29,20 @@ struct MainTabView: View {
                 }
                 .tag(AppFeature.Tab.apps)
 
-            ShellView(store: store.scope(state: \.shell, action: \.shell))
+            ConsoleView(
+                shellStore: store.scope(state: \.shell, action: \.shell),
+                logcatStore: store.scope(state: \.logcat, action: \.logcat)
+            )
                 .tabItem {
-                    Label("Shell", systemImage: "terminal")
+                    Label("Console", systemImage: "terminal")
                 }
-                .tag(AppFeature.Tab.shell)
-
-            LogcatView(store: store.scope(state: \.logcat, action: \.logcat))
-                .tabItem {
-                    Label("Logcat", systemImage: "doc.text")
-                }
-                .tag(AppFeature.Tab.logcat)
+                .tag(AppFeature.Tab.console)
 
             ScreenshotView(store: store.scope(state: \.screenshot, action: \.screenshot))
                 .tabItem {
-                    Label("Screen", systemImage: "camera")
+                    Label("Screens", systemImage: "rectangle.stack")
                 }
-                .tag(AppFeature.Tab.screenshot)
+                .tag(AppFeature.Tab.screens)
         }
         .allowsHitTesting(!isShowingDisconnectedOverlay)
         .accessibilityHidden(isShowingDisconnectedOverlay)
@@ -57,8 +51,8 @@ struct MainTabView: View {
                 DisconnectedOverlay(
                     lastDevice: store.connection.lastConnectionDevice,
                     errorMessage: store.connection.lastConnectionError,
-                    onConnect: {
-                        store.send(.selectTab(.connection))
+                    onOpenDevice: {
+                        store.send(.selectTab(.device))
                     },
                     onReconnect: store.connection.lastConnectionDevice == nil
                         ? nil
@@ -69,67 +63,127 @@ struct MainTabView: View {
     }
 
     private var isShowingDisconnectedOverlay: Bool {
-        !store.connection.connectionState.isConnected && store.selectedTab != .connection
+        !store.connection.connectionState.isConnected && store.selectedTab.visibleRoot != .device
+    }
+
+    private var visibleTabBinding: Binding<AppFeature.Tab> {
+        Binding(
+            get: { store.selectedTab.visibleRoot },
+            set: { store.send(.selectTab($0)) }
+        )
     }
 }
 
 struct DisconnectedOverlay: View {
     let lastDevice: DiscoveredDevice?
     let errorMessage: String?
-    let onConnect: () -> Void
+    let onOpenDevice: () -> Void
     let onReconnect: (() -> Void)?
 
     var body: some View {
-        VStack(spacing: 16) {
-            Image(systemName: "wifi.slash")
-                .font(.system(size: 48))
-                .foregroundColor(.secondary)
-            Text("Not Connected")
-                .font(.headline)
-            Text("Connect to an Android device first")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-            if let lastDevice {
-                VStack(spacing: 4) {
-                    Text(lastDevice.name)
-                        .font(.subheadline.weight(.medium))
-                    Text("\(lastDevice.host):\(lastDevice.port)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+        ZStack {
+            IADBScreenBackground()
+
+            GeometryReader { proxy in
+                ScrollView {
+                    recoveryCard
+                        .frame(maxWidth: 420)
+                        .padding(24)
+                        .frame(
+                            maxWidth: .infinity,
+                            minHeight: proxy.size.height,
+                            alignment: .center
+                        )
                 }
-            }
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
-            }
-            if let onReconnect {
-                Button("Reconnect Last Device") {
-                    onReconnect()
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
-            }
-            if onReconnect == nil {
-                Button("Go to Connect") {
-                    onConnect()
-                }
-                .buttonStyle(.borderedProminent)
-                .frame(minHeight: 44)
-            } else {
-                Button("Go to Connect") {
-                    onConnect()
-                }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
+                .scrollBounceBehavior(.basedOnSize)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.ultraThinMaterial)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
+    }
+
+    private var recoveryCard: some View {
+        IADBCard {
+            VStack(spacing: IADBDesign.sectionSpacing) {
+                IADBIconTile(symbol: "wifi.slash", tint: .orange)
+
+                VStack(spacing: 6) {
+                    Text("Device Required")
+                        .font(.title3.weight(.semibold))
+                    Text("Connect an Android device to use this workspace.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+
+                if let lastDevice {
+                    VStack(spacing: 4) {
+                        Text(lastDevice.name)
+                            .font(.subheadline.weight(.semibold))
+                        Text("\(lastDevice.host):\(lastDevice.port)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                    .background(Color(uiColor: .tertiarySystemGroupedBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+
+                if let errorMessage {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .accessibilityHidden(true)
+                        Text(errorMessage)
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .font(.caption)
+                    .multilineTextAlignment(.leading)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("Connection error. \(errorMessage)")
+                }
+
+                VStack(spacing: 10) {
+                    if let onReconnect {
+                        Button {
+                            onReconnect()
+                        } label: {
+                            Label("Reconnect Last Device", systemImage: "arrow.clockwise")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .frame(minHeight: 44)
+                    }
+
+                    if onReconnect == nil {
+                        Button {
+                            onOpenDevice()
+                        } label: {
+                            Label("Open Device", systemImage: "rectangle.portrait")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .frame(minHeight: 44)
+                    } else {
+                        Button {
+                            onOpenDevice()
+                        } label: {
+                            Label("Open Device", systemImage: "rectangle.portrait")
+                        }
+                        .buttonStyle(.bordered)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.regular)
+                        .frame(minHeight: 44)
+                    }
+                }
+            }
+        }
     }
 }
 

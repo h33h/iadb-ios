@@ -4,6 +4,8 @@ import ComposableArchitecture
 @Reducer
 struct AppFeature {
     enum Tab: Int, Equatable {
+        // Legacy values remain valid for state restoration and reducer tests.
+        // `visibleRoot` folds them into the five task-oriented tabs.
         case connection = 0
         case device = 1
         case files = 2
@@ -11,6 +13,18 @@ struct AppFeature {
         case shell = 4
         case logcat = 5
         case screenshot = 6
+        case console = 7
+        case screens = 8
+
+        var visibleRoot: Self {
+            switch self {
+            case .connection, .device: .device
+            case .files: .files
+            case .apps: .apps
+            case .shell, .logcat, .console: .console
+            case .screenshot, .screens: .screens
+            }
+        }
     }
 
     @ObservableState

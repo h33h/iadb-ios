@@ -7,10 +7,10 @@ iADB has no login or server account. It connects to an Android 11 or newer devic
 1. Put the iPhone or iPad and Android device on the same Wi-Fi network.
 2. On Android, enable Developer options and Wireless debugging.
 3. Open **Pair device with pairing code** on Android.
-4. In iADB, tap **Pair Manually** or select the discovered device, then enter the address, pairing port, and six-digit code shown by Android.
-5. Select the paired device to connect. Allow Local Network access when iOS asks.
+4. In iADB, open **Device**, tap **Connect a Device**, then choose **Pair Manually** or select the discovered device. Enter the address, pairing port, and six-digit code shown by Android.
+5. After pairing, iADB connects automatically if the discovered Bonjour service remains available. Otherwise, enter the IP address and regular Wireless debugging port from Android's main Wireless debugging screen, then tap **Connect**. Allow Local Network access when iOS asks.
 
-After connection, the Device, Files, Apps, Shell, Logcat, and Screen sections become available. The Screen section can save a captured Android screenshot to Photos after the reviewer grants add-only Photos access.
+After connection, Device, Files, Apps, Console, and Screens become available. Console contains Shell and Logs. Screens can save a captured Android screenshot to Photos after the reviewer grants add-only Photos access.
 
 The pairing port and regular Wireless debugging port differ. If Android closes its pairing dialog before step 4, open the dialog again and use the new code and port.
 

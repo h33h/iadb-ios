@@ -1,0 +1,15 @@
+iADB requires an Android device to review its core features. The app has no account, demo login, cloud service, or developer-operated server.
+
+Test setup:
+1. Use an Android device running Android 11 or later.
+2. Connect the iPhone or iPad and the Android device to the same local Wi-Fi network.
+3. On Android, enable Developer options, open Wireless debugging, and choose Pair device with pairing code. Settings labels vary by manufacturer.
+4. In iADB, allow Local Network access, open Device, tap Connect a Device, choose Pair Manually if discovery has not listed the device, then enter the Android IP address, pairing port, and six-digit pairing code.
+5. Use the pairing port shown in the Android pairing dialog. This port is different from the Wireless debugging connection port shown on the main Wireless debugging screen.
+6. After pairing, iADB connects automatically if the discovered Bonjour service is still available. Otherwise, iADB opens a connection form. Enter the IP address and regular Wireless debugging port from Android's main Wireless debugging screen, then tap Connect.
+
+The reviewer can then inspect device information, browse files, inspect installed packages, run commands under Console › Shell, stream logs under Console › Logs, and capture the Android screen under Screens. iADB sends each requested command only to the Android device that the user authorizes through Android Wireless debugging.
+
+The deterministic screenshot fixture is guarded by DEBUG compilation and is absent from the submitted Release build.
+
+A demo video showing the pairing and connection flow, or access to suitable Android hardware, must be attached manually in App Store Connect before submission.

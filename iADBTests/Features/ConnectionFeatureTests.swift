@@ -6,17 +6,35 @@ import Testing
 @MainActor
 struct ConnectionFeatureTests {
     @Test
-    func onAppearStartsDiscovery() async {
+    func onAppearWithoutSavedDevicesWaitsForExplicitScan() async {
         let store = TestStore(initialState: ConnectionFeature.State()) {
             ConnectionFeature()
         } withDependencies: {
             $0.pairedDevicesClient.load = { [] }
+        }
+
+        await store.send(.onAppear)
+    }
+
+    @Test
+    func onAppearWithSavedDeviceStartsDiscovery() async {
+        let paired = PairedDevice(
+            name: "Pixel",
+            guid: "pixel-guid",
+            lastHost: "192.168.1.20"
+        )
+        let store = TestStore(initialState: ConnectionFeature.State()) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.pairedDevicesClient.load = { [paired] }
             $0.deviceDiscoveryClient.start = { _ in
                 AsyncStream { $0.yield(.devices([])); $0.finish() }
             }
         }
 
-        await store.send(.onAppear)
+        await store.send(.onAppear) {
+            $0.pairedDevices = [paired]
+        }
         await store.receive(\.startDiscovery) {
             $0.isScanning = true
         }

@@ -39,7 +39,7 @@ struct PrivacyPolicyView: View {
 
                 Section("Deleting data") {
                     Text(
-                        "Use Forget for one saved Android device, or Reset ADB Identity under Help to remove the "
+                        "Use Forget for one saved Android device, or Reset ADB Identity in Settings to remove the "
                             + "Keychain identity and every saved device before deleting iADB. Clear Shell history, "
                             + "Logcat presets, and saved screenshots from their screens. Deleting iADB removes its "
                             + "app-container data, but the Keychain identity may otherwise remain. Remove iADB from "

@@ -249,8 +249,15 @@ struct ConnectionFeature {
                 state.pairedDevices = pairedDevicesClient.load()
                 #if DEBUG
                 state.debugSettings = debugSettingsClient.load()
+                let shouldStartDiscovery = !state.pairedDevices.isEmpty
+                    || state.debugSettings.useAndroidEmulator
+                #else
+                let shouldStartDiscovery = !state.pairedDevices.isEmpty
                 #endif
-                return .send(.startDiscovery)
+                // Ask for Local Network access only after the user has paired a
+                // device or explicitly starts a scan. An unexplained permission
+                // prompt on first launch makes the onboarding flow feel broken.
+                return shouldStartDiscovery ? .send(.startDiscovery) : .none
 
             case .startDiscovery:
                 state.isScanning = true

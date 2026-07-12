@@ -28,9 +28,17 @@ struct FileManagerView: View {
     var body: some View {
         NavigationStack {
             AnyView(navigationContent)
+                .iadbContentWidth()
                 .navigationTitle("Files")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar(content: {
+                    if store.isSelectionMode {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") {
+                                store.send(.clearSelection)
+                            }
+                        }
+                    }
                     ToolbarItem(placement: .primaryAction) {
                         Menu {
                             Button {
@@ -230,35 +238,106 @@ struct FileManagerView: View {
     }
 
     private var navigationContent: some View {
-            VStack(spacing: 0) {
-                if store.isLoading, store.fileLoadPurpose != nil {
-                    fileLoadingBanner
-                }
-
-                if let error = store.errorMessage {
-                    StatusBannerView(style: .error, message: error)
-                        .padding(.horizontal)
-                        .padding(.top, store.isLoading ? 0 : 8)
-                        .padding(.bottom, 8)
-                }
-
-                // Path bar
-                PathBar(
-                    path: store.currentPath,
-                    canGoBack: store.pathHistory.count > 1,
-                    canGoUp: store.currentPath != "/",
-                    onBack: { store.send(.goBack) },
-                    onUp: { store.send(.navigateUp) },
-                    onPathTap: showCurrentPathEditor
-                )
-                .disabled(store.isLoading)
-
-                if store.isSelectionMode {
-                    selectionBanner
-                }
-
-                mainContent
+        VStack(spacing: 0) {
+            if store.isLoading, store.fileLoadPurpose != nil {
+                fileLoadingBanner
             }
+
+            if let error = store.errorMessage, !store.entries.isEmpty {
+                StatusBannerView(style: .error, message: error)
+                    .padding(.horizontal)
+                    .padding(.top, store.isLoading ? 0 : 8)
+                    .padding(.bottom, 8)
+            }
+
+            PathBar(
+                path: store.currentPath,
+                canGoBack: store.pathHistory.count > 1,
+                canGoUp: store.currentPath != "/",
+                onBack: { store.send(.goBack) },
+                onUp: { store.send(.navigateUp) },
+                onPathTap: showCurrentPathEditor
+            )
+            .disabled(store.isLoading)
+
+            mainContent
+        }
+        .background(Color(uiColor: .systemGroupedBackground))
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if store.isSelectionMode {
+                selectionBar
+            }
+        }
+    }
+
+    private var selectionBar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                selectionSummary
+                    .fixedSize(horizontal: true, vertical: true)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    store.send(.clearSelection)
+                } label: {
+                    Text("Clear Selection")
+                        .fixedSize(horizontal: true, vertical: true)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    showingBatchDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .fixedSize(horizontal: true, vertical: true)
+                        .frame(minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(store.selectedEntryPaths.isEmpty)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                selectionSummary
+
+                Button {
+                    store.send(.clearSelection)
+                } label: {
+                    Text("Clear Selection")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.bordered)
+
+                Button(role: .destructive) {
+                    showingBatchDeleteConfirm = true
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(store.selectedEntryPaths.isEmpty)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.regularMaterial)
+        .overlay(alignment: .top) { Divider() }
+    }
+
+    private var selectionSummary: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text("Selected")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("\(store.selectedEntryPaths.count) items")
+                .font(.subheadline.weight(.semibold))
+                .monospacedDigit()
+        }
     }
 
     private func showCurrentPathEditor() {
@@ -268,9 +347,9 @@ struct FileManagerView: View {
 
     @ViewBuilder
     private var mainContent: some View {
-        if store.isLoading {
+        if store.isLoading && store.entries.isEmpty {
             loadingContent
-        } else if store.errorMessage != nil {
+        } else if store.errorMessage != nil && store.entries.isEmpty {
             errorContent
         } else if store.entries.isEmpty {
             emptyContent
@@ -360,14 +439,11 @@ struct FileManagerView: View {
             )
         }
         .listStyle(.plain)
+        .scrollContentBackground(.hidden)
     }
 
     private func openEntry(_ entry: FileEntry) {
-        if entry.isDirectory {
-            store.send(.navigateTo(entry))
-        } else {
-            store.send(.selectFile(entry))
-        }
+        store.send(.navigateTo(entry))
     }
 
     private func downloadEntry(_ entry: FileEntry) {
@@ -415,21 +491,6 @@ struct FileManagerView: View {
         store.send(.selectFile(nil))
     }
 
-    private var selectionBanner: some View {
-        StatusBannerView(
-            style: .info,
-            message: "\(store.selectedEntryPaths.count) selected",
-            actionTitle: store.selectedEntryPaths.isEmpty ? nil : "Delete Selected",
-            onDismiss: nil,
-            onAction: store.selectedEntryPaths.isEmpty ? nil : {
-                showingBatchDeleteConfirm = true
-            }
-        )
-        .padding(.horizontal)
-        .padding(.top, 8)
-        .padding(.bottom, 8)
-    }
-
     @ViewBuilder
     private var fileLoadingBanner: some View {
         if let file = store.selectedFile {
@@ -454,15 +515,35 @@ struct FileListEntryView: View {
     let onActions: (FileEntry) -> Void
 
     var body: some View {
-        Button {
-            onOpen(entry)
-        } label: {
-            FileEntryRow(entry: entry, isSelectionMode: isSelectionMode, isSelected: isSelected)
+        HStack(spacing: 4) {
+            Button {
+                onOpen(entry)
+            } label: {
+                FileEntryRow(
+                    entry: entry,
+                    isSelectionMode: isSelectionMode,
+                    isSelected: isSelected
+                )
                 .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityLabel(entry.isDirectory ? "Folder \(entry.displayName)" : entry.isSymlink ? "Link \(entry.displayName)" : "File \(entry.displayName)")
+            .accessibilityHint(isSelectionMode ? "Selects this item" : entry.isDirectory ? "Opens this folder" : "Shows item actions")
+
+            if !isSelectionMode {
+                Button {
+                    onActions(entry)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Actions for \(entry.displayName)")
+            }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(entry.isDirectory ? "Folder \(entry.displayName)" : entry.isSymlink ? "Link \(entry.displayName)" : "File \(entry.displayName)")
-        .accessibilityHint(isSelectionMode ? "Selects this item" : entry.isDirectory ? "Opens this folder" : "Shows item actions")
         .contextMenu {
             if !isSelectionMode {
                 Button {
@@ -532,16 +613,26 @@ struct PathBar: View {
             .accessibilityLabel("Parent folder")
 
             Button(action: onPathTap) {
-                Text(path)
-                    .font(.system(.caption, design: .monospaced))
-                    .lineLimit(1)
-                    .truncationMode(.head)
+                HStack(spacing: 8) {
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(.tint)
+                    Text(path)
+                        .font(.system(.caption, design: .monospaced))
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                    Image(systemName: "pencil")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color(uiColor: .secondarySystemGroupedBackground))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
-            .frame(minHeight: 44)
+            .frame(maxWidth: .infinity, minHeight: 44)
             .accessibilityLabel("Current path \(path). Double-tap to edit.")
-
-            Spacer()
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -553,6 +644,7 @@ struct FileEntryRow: View {
     let entry: FileEntry
     var isSelectionMode: Bool = false
     var isSelected: Bool = false
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(spacing: 12) {
@@ -568,18 +660,10 @@ struct FileEntryRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.displayName)
                     .font(.body)
-                    .lineLimit(1)
-                HStack(spacing: 8) {
-                    Text(entry.permissions)
-                        .font(.system(.caption2, design: .monospaced))
-                    if !entry.size.isEmpty {
-                        Text(entry.displaySize)
-                            .font(.caption2)
-                    }
-                    Text("\(entry.date) \(entry.time)")
-                        .font(.caption2)
-                }
-                .foregroundColor(.secondary)
+                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 1)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .layoutPriority(1)
+                metadata
             }
 
             Spacer()
@@ -591,6 +675,35 @@ struct FileEntryRow: View {
             }
         }
         .padding(.vertical, 2)
+    }
+
+    @ViewBuilder
+    private var metadata: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: 2) {
+                sizeAndPermissions
+                Text("\(entry.date) \(entry.time)")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        } else {
+            HStack(spacing: 8) {
+                sizeAndPermissions
+                Text("\(entry.date) \(entry.time)")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+        }
+    }
+
+    private var sizeAndPermissions: some View {
+        HStack(spacing: 8) {
+            if !entry.size.isEmpty {
+                Text(entry.displaySize)
+            }
+            Text(entry.permissions)
+                .fontDesign(.monospaced)
+        }
     }
 }
 
@@ -666,6 +779,7 @@ struct FilePreviewSheet: View {
                         } label: {
                             Image(systemName: copiedText ? "checkmark.circle" : "doc.on.doc")
                         }
+                        .accessibilityLabel(copiedText ? "Copied text" : "Copy preview text")
                     }
                 }
 
@@ -676,6 +790,7 @@ struct FilePreviewSheet: View {
                         } label: {
                             Image(systemName: "square.and.arrow.up")
                         }
+                        .accessibilityLabel("Share file")
 
                         Button("Done") {
                             dismiss()

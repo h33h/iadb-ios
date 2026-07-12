@@ -31,17 +31,15 @@ Run Android Wireless Debugging workflows from iPhone or iPad.
 
 ## Screenshots
 
-| Connect | Device Info | Files |
-| --- | --- | --- |
-| <img src="screenshots/IMG_0354.PNG" alt="Connect screen with discovered Android device" width="220" /> | <img src="screenshots/IMG_0355.PNG" alt="Device info screen with Android version and hardware details" width="220" /> | <img src="screenshots/IMG_0356.PNG" alt="File manager browsing Android filesystem" width="220" /> |
+All repository captures use the deterministic, fictional App Store fixture.
 
-| Apps | More | Logcat |
+| Device | Files | Shell |
 | --- | --- | --- |
-| <img src="screenshots/IMG_0357.PNG" alt="Installed apps list with filters and actions" width="220" /> | <img src="screenshots/IMG_0358.PNG" alt="More tab with Shell, Logcat, and Screen tools" width="220" /> | <img src="screenshots/IMG_0359.PNG" alt="Logcat viewer with live logs and export controls" width="220" /> |
+| <img src="app-store/screenshots/iphone-6.9/01-device.png" alt="Connected Android device dashboard" width="220" /> | <img src="app-store/screenshots/iphone-6.9/02-files.png" alt="Android file manager" width="220" /> | <img src="app-store/screenshots/iphone-6.9/03-shell.png" alt="ADB Shell history and pinned commands" width="220" /> |
 
-| Shell |
-| --- |
-| <img src="screenshots/IMG_0360.PNG" alt="ADB shell screen with command shortcuts" width="220" /> |
+| Apps | Logs | Screens |
+| --- | --- | --- |
+| <img src="app-store/screenshots/iphone-6.9/04-apps.png" alt="Installed app library" width="220" /> | <img src="app-store/screenshots/iphone-6.9/05-logs.png" alt="Live filtered Logcat output" width="220" /> | <img src="app-store/screenshots/iphone-6.9/06-screens.png" alt="Android screenshot gallery" width="220" /> |
 
 ## Getting Started
 
@@ -81,9 +79,9 @@ xcodebuild test \
 
 ## Debug Android Emulator Mode
 
-Debug builds include a hidden connection-screen debug modal for production-like checks against a local Android Emulator. Long press the Help section header to open it.
+Debug builds include an Android Emulator panel under Device › Settings for production-like checks against a local emulator.
 
-Use the `iADB Android Emulator` scheme or enable `Use Android Emulator` in the debug modal. When the configured ADB endpoint is reachable, the modal injects a synthetic discovered device. `ADBClient` stays live, so connect, shell, files, apps, logcat, and screenshots still use the real ADB protocol.
+Use the `iADB Android Emulator` scheme or enable `Use Android Emulator` in that panel. When the configured ADB endpoint is reachable, iADB injects a synthetic discovered device. `ADBClient` stays live, so connect, shell, files, apps, logcat, and screenshots still use the real ADB protocol.
 
 Defaults:
 
