@@ -4,30 +4,31 @@
 [![App Store Release](https://github.com/h33h/iadb-ios/actions/workflows/release.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/release.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Run Android Wireless Debugging workflows from iPhone or iPad.
+<p align="center">
+  <img src="app-store/icon/AppIcon-1024.png" alt="iADB icon showing Android and a terminal inside an iPhone" width="144" />
+</p>
 
-`iADB` is a native iOS app for discovering Android devices on the local network, pairing with Wireless Debugging, and using common ADB features without switching to a desktop machine.
+Run Android Wireless Debugging workflows from an iPhone or iPad.
+
+`iADB` discovers Android devices on local Wi-Fi, pairs through Wireless Debugging, and gives you common ADB tools without a desktop computer. The app uses no account, ads, analytics, tracking, or developer-operated relay.
 
 ## Highlights
 
-- Native iOS app built with SwiftUI
-- Wireless Debugging pairing flow with pairing code support
-- Local network device discovery
-- Quick reconnect to previously used devices
-- Device info, files, apps, shell, logcat, and screenshots in one app
-- CI for tests, signed App Store archives, validation, and TestFlight upload
+- Five focused tabs: Device, Files, Apps, Console, and Screens
+- Pairing-code flow, local discovery, manual endpoints, and quick reconnect
+- Native SwiftUI interface with Dynamic Type and VoiceOver support
+- Shell and Logcat share one Console without mixing their controls
+- Release workflow for signed archives, App Store validation, and optional TestFlight upload
 
 ## Features
 
-- Discover Android devices on the same Wi-Fi network
-- Pair with `Wireless debugging` using a pairing code
-- Connect and reconnect to paired devices
-- Browse device information
-- Explore files on the device
-- Inspect installed apps
-- Run shell commands
-- Read logcat output
-- Capture screenshots
+| Area | Available actions |
+| --- | --- |
+| Device | Discover, pair, connect, reconnect, inspect device details, and manage saved connections. |
+| Files | Browse paths, preview and download files, upload content, create folders or files, rename, move, duplicate, and delete. |
+| Apps | Search, filter, and sort packages; install APKs; launch, force stop, clear data, or uninstall apps. |
+| Console | Run and stop shell commands, reuse or pin history, filter Logcat, save filters, pause the live display, and export logs. |
+| Screens | Capture, inspect, zoom, share, copy, save, and delete Android screenshots. |
 
 ## Screenshots
 
@@ -109,23 +110,43 @@ Both devices must be on the same Wi-Fi network.
 
 ## CI
 
-The repository includes GitHub Actions workflows for:
+GitHub Actions provide:
 
 - build and test on pull requests and pushes to `main`
 - signed App Store archive, validation, and optional TestFlight upload from version tags or a manual run
+
+The release workflow needs Apple signing and App Store Connect secrets before it can create or upload a signed build.
+
+## Release Resources
+
+- [App Store assets and screenshot capture](app-store/README.md)
+- [Release checklist](app-store/RELEASE_CHECKLIST.md)
+- [Privacy policy](PRIVACY.md)
+- [Support](SUPPORT.md)
+
+Regenerate the App Store screenshots or run the offline release gate from the repository root:
+
+```bash
+scripts/capture-app-store-screenshots.sh
+scripts/validate-app-store-release.sh
+```
 
 ## Roadmap
 
 - Expand connection diagnostics and recovery hints
 - Improve file management workflows for larger transfers
 - Add more automated coverage around device-specific edge cases
-- Expand release automation for App Store metadata and screenshots
+- Automate App Store Connect metadata delivery
 
 ## Project Layout
 
 - `iADB/` app source code
 - `iADBTests/` unit and feature tests
+- `iADBUITests/` UI and App Store screenshot tests
 - `.github/workflows/` CI pipelines
+- `scripts/` project, test, screenshot, and release tools
+- `app-store/` icon, screenshots, metadata, and release checklist
+- `design-system/` UI principles and design tokens
 
 ## Contributing
 
