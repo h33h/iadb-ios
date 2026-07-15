@@ -13,6 +13,9 @@ struct ADBClientDependency: Sendable {
     var isConnected: @Sendable () -> Bool
     var connectionEvents: @Sendable () -> AsyncStream<ADBConnectionEvent>
     var shell: @Sendable (_ command: String) async throws -> String
+    var openShellCommand: @Sendable (
+        _ command: String
+    ) async throws -> AsyncThrowingStream<ShellEvent, Error>
     var getDeviceProperty: @Sendable (_ property: String) async throws -> String
     var getDeviceModel: @Sendable () async throws -> String
     var getAndroidVersion: @Sendable () async throws -> String
@@ -28,8 +31,19 @@ struct ADBClientDependency: Sendable {
     var listDirectoryEntries: @Sendable (_ path: String) async throws -> [FileEntry]
     var pushData: @Sendable (_ data: Data, _ remotePath: String, _ mode: UInt32) async throws -> Void
     var pushFile: @Sendable (_ localURL: URL, _ remotePath: String, _ mode: UInt32) async throws -> Void
+    var pushFileWithProgress: @Sendable (
+        _ localURL: URL,
+        _ remotePath: String,
+        _ mode: UInt32,
+        _ progress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> Void
     var pullFile: @Sendable (_ remotePath: String, _ maximumBytes: Int) async throws -> Data
     var pullFileTo: @Sendable (_ remotePath: String, _ localURL: URL) async throws -> Void
+    var pullFileToWithProgress: @Sendable (
+        _ remotePath: String,
+        _ localURL: URL,
+        _ progress: @escaping @Sendable (TransferProgress) async -> Void
+    ) async throws -> Void
     var takeScreenshot: @Sendable () async throws -> Data
     var openLogcatStream: @Sendable () async throws -> ADBStream
     var reboot: @Sendable (_ mode: String) async throws -> Void
@@ -115,6 +129,28 @@ extension ADBClientDependency: DependencyKey {
             shell: { command in
                 try await withClient { try await $0.shell(command) }
             },
+            openShellCommand: { command in
+                AsyncThrowingStream { continuation in
+                    let task = Task {
+                        do {
+                            try await serializer.run {
+                                guard let activeClient = client.value else { throw ADBError.notConnected }
+                                let events = try await activeClient.openShellCommand(command)
+                                for try await event in events {
+                                    try Task.checkCancellation()
+                                    continuation.yield(event)
+                                }
+                            }
+                            continuation.finish()
+                        } catch is CancellationError {
+                            continuation.finish()
+                        } catch {
+                            continuation.finish(throwing: error)
+                        }
+                    }
+                    continuation.onTermination = { _ in task.cancel() }
+                }
+            },
             getDeviceProperty: { property in
                 try await withClient { try await $0.getDeviceProperty(property) }
             },
@@ -160,11 +196,21 @@ extension ADBClientDependency: DependencyKey {
             pushFile: { localURL, remotePath, mode in
                 try await withClient { try await $0.pushFile(from: localURL, to: remotePath, mode: mode) }
             },
+            pushFileWithProgress: { localURL, remotePath, mode, progress in
+                try await withClient {
+                    try await $0.pushFile(from: localURL, to: remotePath, mode: mode, progress: progress)
+                }
+            },
             pullFile: { remotePath, maximumBytes in
                 try await withClient { try await $0.pullFile(remotePath: remotePath, maximumBytes: maximumBytes) }
             },
             pullFileTo: { remotePath, localURL in
                 try await withClient { try await $0.pullFile(remotePath: remotePath, to: localURL) }
+            },
+            pullFileToWithProgress: { remotePath, localURL, progress in
+                try await withClient {
+                    try await $0.pullFile(remotePath: remotePath, to: localURL, progress: progress)
+                }
             },
             takeScreenshot: {
                 try await withClient { try await $0.takeScreenshot() }
@@ -186,6 +232,13 @@ extension ADBClientDependency: DependencyKey {
             isConnected: { true },
             connectionEvents: { AsyncStream { $0.finish() } },
             shell: { _ in "" },
+            openShellCommand: { _ in
+                AsyncThrowingStream { continuation in
+                    continuation.yield(.stdout(Data("Preview command output\n".utf8)))
+                    continuation.yield(.exit(0))
+                    continuation.finish()
+                }
+            },
             getDeviceProperty: { _ in "Preview" },
             getDeviceModel: { "Preview Phone" },
             getAndroidVersion: { "14" },
@@ -201,9 +254,18 @@ extension ADBClientDependency: DependencyKey {
             listDirectoryEntries: { _ in [] },
             pushData: { _, _, _ in },
             pushFile: { _, _, _ in },
-            pullFile: { _, _ in Data() },
+            pushFileWithProgress: { _, _, _, _ in },
+            pullFile: { remotePath, maximumBytes in
+                let text = "iADB fictional preview fixture\nPath: \(remotePath)\n"
+                return Data(text.utf8.prefix(maximumBytes))
+            },
             pullFileTo: { _, _ in },
-            takeScreenshot: { Data() },
+            pullFileToWithProgress: { _, _, _ in },
+            takeScreenshot: {
+                Data(base64Encoded:
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                ) ?? Data()
+            },
             openLogcatStream: { throw ADBError.notConnected },
             reboot: { _ in }
         )
@@ -217,6 +279,7 @@ extension ADBClientDependency: DependencyKey {
             isConnected: { false },
             connectionEvents: { AsyncStream { $0.finish() } },
             shell: unimplemented("ADBClientDependency.shell"),
+            openShellCommand: unimplemented("ADBClientDependency.openShellCommand"),
             getDeviceProperty: unimplemented("ADBClientDependency.getDeviceProperty"),
             getDeviceModel: unimplemented("ADBClientDependency.getDeviceModel"),
             getAndroidVersion: unimplemented("ADBClientDependency.getAndroidVersion"),
@@ -232,8 +295,10 @@ extension ADBClientDependency: DependencyKey {
             listDirectoryEntries: unimplemented("ADBClientDependency.listDirectoryEntries"),
             pushData: unimplemented("ADBClientDependency.pushData"),
             pushFile: unimplemented("ADBClientDependency.pushFile"),
+            pushFileWithProgress: { _, _, _, _ in throw ADBError.notConnected },
             pullFile: unimplemented("ADBClientDependency.pullFile"),
             pullFileTo: unimplemented("ADBClientDependency.pullFileTo"),
+            pullFileToWithProgress: { _, _, _ in throw ADBError.notConnected },
             takeScreenshot: unimplemented("ADBClientDependency.takeScreenshot"),
             openLogcatStream: unimplemented("ADBClientDependency.openLogcatStream"),
             reboot: unimplemented("ADBClientDependency.reboot")

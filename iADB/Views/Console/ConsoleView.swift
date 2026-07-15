@@ -4,59 +4,78 @@ import ComposableArchitecture
 struct ConsoleView: View {
     let shellStore: StoreOf<ShellFeature>
     let logcatStore: StoreOf<LogcatFeature>
-
-    @State private var selectedSection = ConsoleSection.shell
+    @Bindable var appShellStore: StoreOf<AppShellFeature>
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                Picker("Console mode", selection: $selectedSection) {
-                    ForEach(ConsoleSection.allCases) { section in
-                        Text(section.title)
-                            .tag(section)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .frame(maxWidth: 420)
-                .padding(.horizontal)
-                .padding(.vertical, 10)
-                .accessibilityLabel("Console mode")
-                .accessibilityValue(selectedSection.title)
-                .accessibilityHint("Switches between command shell and device logs")
+                consolePicker
 
                 Divider()
 
-                switch selectedSection {
-                case .shell:
+                switch appShellStore.consoleSection {
+                case .commandRunner:
                     ShellView(
                         store: shellStore,
-                        isEmbeddedInNavigationStack: true
+                        isEmbeddedInNavigationStack: true,
+                        focusRequestID: appShellStore.focusRequestID
                     )
-                case .logs:
+                case .logcat:
                     LogcatView(
                         store: logcatStore,
-                        isEmbeddedInNavigationStack: true
+                        isEmbeddedInNavigationStack: true,
+                        focusRequestID: appShellStore.focusRequestID
                     )
                 }
             }
-            .iadbContentWidth()
+            .iadbWorkspaceWidth()
             .background(Color(uiColor: .systemGroupedBackground))
             .navigationTitle("Console")
             .navigationBarTitleDisplayMode(.inline)
         }
     }
-}
 
-private enum ConsoleSection: String, CaseIterable, Identifiable {
-    case shell
-    case logs
+    private var consolePicker: some View {
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                Picker("Console mode", selection: consoleSelection) {
+                    consolePickerOptions
+                }
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                Picker("Console mode", selection: consoleSelection) {
+                    consolePickerOptions
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 420)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .accessibilityLabel("Console mode")
+        .accessibilityValue(consoleSectionTitle)
+        .accessibilityHint("Switches between command runner and device logs")
+    }
 
-    var id: Self { self }
+    private var consoleSelection: Binding<AppShellFeature.ConsoleSection> {
+        Binding(
+            get: { appShellStore.consoleSection },
+            set: { appShellStore.send(.selectConsoleSection($0)) }
+        )
+    }
 
-    var title: String {
-        switch self {
-        case .shell: return "Shell"
-        case .logs: return "Logs"
+    @ViewBuilder
+    private var consolePickerOptions: some View {
+        Text("Command Runner").tag(AppShellFeature.ConsoleSection.commandRunner)
+        Text("Logcat").tag(AppShellFeature.ConsoleSection.logcat)
+    }
+
+    private var consoleSectionTitle: String {
+        switch appShellStore.consoleSection {
+        case .commandRunner: String(localized: "Command Runner")
+        case .logcat: String(localized: "Logcat")
         }
     }
 }

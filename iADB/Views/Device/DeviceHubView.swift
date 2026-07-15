@@ -6,13 +6,15 @@ import ComposableArchitecture
 struct DeviceHubView: View {
     let connectionStore: StoreOf<ConnectionFeature>
     let deviceStore: StoreOf<DeviceInfoFeature>
+    let screenshotStore: StoreOf<ScreenshotFeature>
+    let session: DeviceSessionFeature.State
+    let operations: OperationCenterFeature.State
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var hasStartedDiscovery = false
+    @State private var showingConnections = false
 
     private enum Route: Hashable {
-        case connections
         case deviceDetails
         case settings
     }
@@ -29,7 +31,7 @@ struct DeviceHubView: View {
                 }
                 .padding(IADBDesign.contentPadding)
                 .padding(.bottom, 24)
-                .iadbContentWidth()
+                .iadbReadableWidth(maxWidth: 820)
             }
             .background(IADBScreenBackground())
             .navigationTitle("Device")
@@ -46,6 +48,18 @@ struct DeviceHubView: View {
                         .accessibilityLabel("Refresh device info")
                     }
 
+                    if connectionStore.connectionState.isConnected {
+                        Menu {
+                            Button("Disconnect", systemImage: "cable.connector.slash", role: .destructive) {
+                                connectionStore.send(.disconnect)
+                            }
+                        } label: {
+                            Image(systemName: "network")
+                                .frame(minWidth: 44, minHeight: 44)
+                        }
+                        .accessibilityLabel("Connection menu")
+                    }
+
                     NavigationLink(value: Route.settings) {
                         Image(systemName: "gearshape")
                     }
@@ -54,16 +68,18 @@ struct DeviceHubView: View {
             }
             .navigationDestination(for: Route.self) { route in
                 switch route {
-                case .connections:
-                    ConnectionView(
-                        store: connectionStore,
-                        isEmbeddedInNavigationStack: false,
-                        startsDiscoveryOnAppear: false
-                    )
                 case .deviceDetails:
-                    DeviceInfoView(store: deviceStore, isEmbeddedInNavigationStack: false)
+                    DeviceInfoView(
+                        store: deviceStore,
+                        isEmbeddedInNavigationStack: false,
+                        lastUpdated: snapshotRelationship?.fetchedAt
+                    )
                 case .settings:
-                    SettingsView(store: connectionStore, isEmbeddedInNavigationStack: false)
+                    SettingsView(
+                        store: connectionStore,
+                        screenshotStore: screenshotStore,
+                        isEmbeddedInNavigationStack: false
+                    )
                 }
             }
             .onAppear {
@@ -77,8 +93,15 @@ struct DeviceHubView: View {
                 guard isConnected else { return }
                 refreshDetailsIfNeeded()
             }
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: connectionStore.connectionState)
         }
+        .fullScreenCover(isPresented: $showingConnections) {
+            ConnectionsFlowView(
+                store: connectionStore,
+                allowsDismissWhenConnected: true,
+                startsDiscoveryOnAppear: false
+            )
+        }
+        .accessibilityIdentifier("workspace.device")
     }
 
     private var connectedContent: some View {
@@ -88,14 +111,14 @@ struct DeviceHubView: View {
             if deviceStore.isLoading {
                 StatusBannerView(
                     style: .progress,
-                    message: "Refreshing device details…",
+                    message: String(localized: "Refreshing device details…"),
                     showsProgress: true
                 )
             } else if let error = deviceStore.errorMessage {
                 StatusBannerView(
                     style: .error,
                     message: error,
-                    actionTitle: "Retry",
+                    actionTitle: String(localized: "Retry"),
                     onDismiss: { deviceStore.send(.dismissError) },
                     onAction: { deviceStore.send(.retryError) }
                 )
@@ -103,49 +126,41 @@ struct DeviceHubView: View {
 
             deviceMetrics
             connectionActionsCard
+            recentActivity
         }
     }
 
     private var connectedHero: some View {
-        IADBCard {
-            VStack(alignment: .leading, spacing: 16) {
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 12) {
-                        connectedHeroIcon
-                        connectedHeroIdentity
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: 16) {
-                        connectedHeroIcon
-                        connectedHeroIdentity
-                        Spacer(minLength: 0)
-                    }
+        VStack(alignment: .leading, spacing: IADBDesign.spacing8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: IADBDesign.spacing12) {
+                    connectedHeroIcon
+                    connectedHeroIdentity
+                    Spacer(minLength: 0)
                 }
-
-                Text("Ready for wireless ADB commands, transfers, and captures.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                NavigationLink(value: Route.deviceDetails) {
-                    Label("View Device Details", systemImage: "list.bullet.rectangle")
+                VStack(alignment: .leading, spacing: IADBDesign.spacing8) {
+                    connectedHeroIcon
+                    connectedHeroIdentity
                 }
-                .buttonStyle(.bordered)
-                .buttonBorderShape(.capsule)
-                .controlSize(.regular)
-                .frame(minHeight: 44, alignment: .leading)
             }
+
+            Text(snapshotStatus)
+                .font(.caption)
+                .foregroundStyle(snapshotIsStale ? .orange : .secondary)
+                .accessibilityLabel(snapshotAccessibilityLabel)
         }
+        .padding(.horizontal, IADBDesign.spacing4)
+        .accessibilityElement(children: .contain)
     }
 
     private var connectedHeroIcon: some View {
         Image(systemName: "smartphone")
             .font(.largeTitle)
             .foregroundStyle(Color.accentColor)
-            .frame(width: 64, height: 64)
+            .frame(width: 44, height: 44)
             .background(
                 Color.accentColor.opacity(0.12),
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                in: RoundedRectangle(cornerRadius: IADBDesign.controlRadius, style: .continuous)
             )
             .accessibilityHidden(true)
     }
@@ -153,7 +168,7 @@ struct DeviceHubView: View {
     private var connectedHeroIdentity: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(connectedDeviceTitle)
-                .font(.title2.weight(.bold))
+                .font(.title3.weight(.semibold))
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
                 .fixedSize(horizontal: false, vertical: true)
             if let endpoint = connectedEndpoint {
@@ -161,8 +176,12 @@ struct DeviceHubView: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Device address, \(endpoint)")
             }
-            IADBStatusBadge(title: "ADB Connected", kind: .success)
+            IADBStatusBadge(
+                title: snapshotIsStale ? String(localized: "Last known") : String(localized: "Connected"),
+                kind: snapshotIsStale ? .warning : .success
+            )
         }
     }
 
@@ -178,29 +197,29 @@ struct DeviceHubView: View {
                 ],
                 spacing: IADBDesign.spacing
             ) {
-                IADBMetricCard(
+                LabeledMetric(
                     title: "Android",
                     value: deviceStore.details.androidVersion,
                     symbol: "a.square.fill",
                     tint: .green
                 )
-                IADBMetricCard(
+                LabeledMetric(
                     title: "Battery",
                     value: batteryDisplay,
                     symbol: batteryIcon,
                     tint: batteryTint
                 )
-                IADBMetricCard(
-                    title: "Available RAM",
-                    value: deviceStore.details.availableMemory,
+                LabeledMetric(
+                    title: "Storage",
+                    value: storageDisplay,
+                    symbol: "internaldrive.fill",
+                    tint: .blue
+                )
+                LabeledMetric(
+                    title: "Memory",
+                    value: memoryDisplay,
                     symbol: "memorychip.fill",
                     tint: .purple
-                )
-                IADBMetricCard(
-                    title: "IP Address",
-                    value: deviceStore.details.ipAddress,
-                    symbol: "network",
-                    tint: .blue
                 )
             }
         }
@@ -208,26 +227,90 @@ struct DeviceHubView: View {
 
     private var connectionActionsCard: some View {
         VStack(alignment: .leading, spacing: IADBDesign.spacing) {
-            IADBSectionHeader("Connection")
+            IADBSectionHeader("Device")
             IADBCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    IADBCallout(
-                        title: "Wireless ADB",
-                        message: "Manage paired devices or end the current secure session.",
-                        symbol: "antenna.radiowaves.left.and.right"
+                VStack(spacing: 0) {
+                    dashboardNavigationRow(
+                        title: "Device Details",
+                        subtitle: "Identifiers, system properties and reboot",
+                        symbol: "list.bullet.rectangle",
+                        route: .deviceDetails,
+                        identifier: "device.primary.details"
                     )
-
                     Divider()
+                    Button { showingConnections = true } label: {
+                        dashboardRowLabel(
+                            title: "Manage Connections",
+                            subtitle: "Current, nearby, saved and manual endpoints",
+                            symbol: "network"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("device.connections")
+                }
+            }
+        }
+    }
 
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: 12) {
-                            manageConnectionsButton
-                            disconnectButton
-                        }
+    private func dashboardNavigationRow(
+        title: LocalizedStringResource,
+        subtitle: LocalizedStringResource,
+        symbol: String,
+        route: Route,
+        identifier: String
+    ) -> some View {
+        NavigationLink(value: route) {
+            dashboardRowLabel(title: title, subtitle: subtitle, symbol: symbol)
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier)
+    }
 
-                        VStack(alignment: .leading, spacing: 8) {
-                            manageConnectionsButton
-                            disconnectButton
+    private func dashboardRowLabel(
+        title: LocalizedStringResource,
+        subtitle: LocalizedStringResource,
+        symbol: String
+    ) -> some View {
+        HStack(spacing: IADBDesign.spacing12) {
+            Image(systemName: symbol)
+                .foregroundStyle(.tint)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .foregroundStyle(.primary)
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: IADBDesign.spacing8)
+            Image(systemName: "chevron.right")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.tertiary)
+                .accessibilityHidden(true)
+        }
+        .frame(minHeight: IADBDesign.minimumHitTarget)
+        .contentShape(Rectangle())
+    }
+
+    private var recentActivity: some View {
+        VStack(alignment: .leading, spacing: IADBDesign.spacing) {
+            IADBSectionHeader("Recent Activity")
+            IADBCard {
+                if operations.operations.isEmpty {
+                    Text("Transfers, installs, captures and exports will appear here.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: IADBDesign.minimumHitTarget, alignment: .leading)
+                } else {
+                    VStack(spacing: 0) {
+                        ForEach(Array(operations.operations.prefix(3).enumerated()), id: \.element.id) { index, operation in
+                            DeviceRecentActivityRow(operation: operation)
+                            if index < min(operations.operations.count, 3) - 1 {
+                                Divider()
+                            }
                         }
                     }
                 }
@@ -236,13 +319,16 @@ struct DeviceHubView: View {
     }
 
     private var manageConnectionsButton: some View {
-        NavigationLink(value: Route.connections) {
+        Button {
+            showingConnections = true
+        } label: {
             Label("Manage Connections", systemImage: "slider.horizontal.3")
         }
         .buttonStyle(.bordered)
-        .buttonBorderShape(.capsule)
+        .buttonBorderShape(.roundedRectangle(radius: IADBDesign.controlRadius))
         .controlSize(.regular)
         .frame(minHeight: 44)
+        .accessibilityIdentifier("device.connections")
     }
 
     private var disconnectButton: some View {
@@ -266,7 +352,9 @@ struct DeviceHubView: View {
                 StatusBannerView(
                     style: .error,
                     message: error,
-                    actionTitle: connectionStore.lastConnectionDevice == nil ? nil : "Reconnect",
+                    actionTitle: connectionStore.lastConnectionDevice == nil
+                        ? nil
+                        : String(localized: "Reconnect"),
                     onDismiss: { connectionStore.send(.clearConnectionError) },
                     onAction: connectionStore.lastConnectionDevice == nil ? nil : {
                         if connectionStore.lastConnectionDevice != nil {
@@ -334,13 +422,16 @@ struct DeviceHubView: View {
                 } else if connectionStore.connectionState == .connecting {
                     cancelConnectionButton
                 } else {
-                    NavigationLink(value: Route.connections) {
+                    Button {
+                        showingConnections = true
+                    } label: {
                         Label("Connect a Device", systemImage: "link.badge.plus")
                     }
                     .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.capsule)
+                    .buttonBorderShape(.roundedRectangle(radius: IADBDesign.controlRadius))
                     .controlSize(.regular)
                     .frame(minHeight: 44, alignment: .leading)
+                    .accessibilityIdentifier("device.primary.connect")
                 }
             }
         }
@@ -357,13 +448,17 @@ struct DeviceHubView: View {
 
     private var disconnectedHeroMessage: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(connectionStore.connectionState == .connecting ? "Connecting…" : "Connect an Android Device")
+            Text(
+                connectionStore.connectionState == .connecting
+                    ? String(localized: "Connecting…")
+                    : String(localized: "Connect an Android Device")
+            )
                 .font(.title2.weight(.bold))
                 .fixedSize(horizontal: false, vertical: true)
             Text(
                 connectionStore.connectionState == .connecting
-                    ? "Establishing a secure ADB session."
-                    : "Pair over local Wi-Fi to use ADB securely from this device."
+                    ? String(localized: "Establishing a secure ADB session.")
+                    : String(localized: "Pair over local Wi-Fi to use ADB securely from this device.")
             )
             .font(.subheadline)
             .foregroundStyle(.secondary)
@@ -434,7 +529,9 @@ struct DeviceHubView: View {
             }
 
             if connectionStore.discoveredDevices.count > 3 {
-                NavigationLink(value: Route.connections) {
+                Button {
+                    showingConnections = true
+                } label: {
                     Text("View All Devices")
                         .font(.subheadline.weight(.semibold))
                 }
@@ -456,7 +553,7 @@ struct DeviceHubView: View {
         }
     }
 
-    private func compactStep(number: Int, title: String, symbol: String) -> some View {
+    private func compactStep(number: Int, title: LocalizedStringResource, symbol: String) -> some View {
         HStack(spacing: IADBDesign.spacing) {
             ZStack {
                 IADBIconTile(symbol: symbol)
@@ -472,7 +569,7 @@ struct DeviceHubView: View {
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number), \(title)")
+        .accessibilityLabel("Step \(number), \(String(localized: title))")
     }
 
     private var savedDeviceSummaryCard: some View {
@@ -486,7 +583,9 @@ struct DeviceHubView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    NavigationLink(value: Route.connections) {
+                    Button {
+                        showingConnections = true
+                    } label: {
                         Text("Manage Saved Devices")
                             .font(.subheadline.weight(.semibold))
                     }
@@ -506,7 +605,7 @@ struct DeviceHubView: View {
     private var connectedDeviceTitle: String {
         if !deviceStore.details.model.isEmpty { return deviceStore.details.model }
         if let name = connectionStore.lastConnectionDevice?.name, !name.isEmpty { return name }
-        return "Android Device"
+        return String(localized: "Android Device")
     }
 
     private var connectedEndpoint: String? {
@@ -516,7 +615,7 @@ struct DeviceHubView: View {
 
     private var batteryDisplay: String {
         let level = deviceStore.details.batteryLevel
-        let status = deviceStore.details.batteryStatus
+        let status = deviceStore.details.localizedBatteryStatus
         return switch (level.isEmpty, status.isEmpty) {
         case (true, true): ""
         case (false, true): level
@@ -540,7 +639,112 @@ struct DeviceHubView: View {
         }
     }
 
+    private var storageDisplay: String {
+        joinedCapacity(available: deviceStore.details.availableStorage, total: deviceStore.details.totalStorage)
+    }
+
+    private var memoryDisplay: String {
+        joinedCapacity(available: deviceStore.details.availableMemory, total: deviceStore.details.totalMemory)
+    }
+
+    private func joinedCapacity(available: String, total: String) -> String {
+        switch (available.isEmpty, total.isEmpty) {
+        case (true, true): "—"
+        case (false, true): String(localized: "\(available) available")
+        case (true, false): total
+        case (false, false): String(localized: "\(available) of \(total) free")
+        }
+    }
+
+    private var snapshotRelationship: RemoteSnapshotRelationship? {
+        session.remoteSnapshots[.device]
+    }
+
+    private var snapshotIsStale: Bool {
+        snapshotRelationship?.isStale == true || !connectionStore.connectionState.isConnected
+    }
+
+    private var snapshotStatus: String {
+        guard let fetchedAt = snapshotRelationship?.fetchedAt else {
+            return String(localized: "Not refreshed yet")
+        }
+        let relative = fetchedAt.formatted(.relative(presentation: .named))
+        return snapshotIsStale
+            ? String(localized: "Last updated \(relative) · data may be stale")
+            : String(localized: "Updated \(relative)")
+    }
+
+    private var snapshotAccessibilityLabel: String {
+        snapshotIsStale ? String(localized: "Device data is stale. \(snapshotStatus)") : snapshotStatus
+    }
+
     private var deviceNoun: String {
-        connectionStore.offlinePairedDevices.count == 1 ? "Device" : "Devices"
+        connectionStore.offlinePairedDevices.count == 1
+            ? String(localized: "Device")
+            : String(localized: "Devices")
+    }
+}
+
+private struct DeviceRecentActivityRow: View {
+    let operation: BackgroundOperation
+
+    var body: some View {
+        HStack(spacing: IADBDesign.spacing12) {
+            Image(systemName: symbol)
+                .foregroundStyle(tint)
+                .frame(width: 24)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(operation.objectName)
+                    .font(.subheadline.weight(.medium))
+                    .lineLimit(1)
+                Text(status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: IADBDesign.spacing8)
+            if let progress = operation.progressFraction, operation.isActive {
+                Text(progress, format: .percent.precision(.fractionLength(0)))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(minHeight: IADBDesign.minimumHitTarget)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(operation.objectName), \(status)")
+    }
+
+    private var status: String {
+        switch operation.outcome {
+        case .success(let summary): summary
+        case .failure(let message, _): message
+        case .cancelled: String(localized: "Cancelled")
+        case nil:
+            switch operation.phase {
+            case .queued: String(localized: "Queued")
+            case .preparing: String(localized: "Preparing")
+            case .running: String(localized: "Running")
+            case .cleaningUp: String(localized: "Cleaning up")
+            case .finished: String(localized: "Finished")
+            }
+        }
+    }
+
+    private var symbol: String {
+        switch operation.kind {
+        case .upload: "arrow.up.circle"
+        case .download: "arrow.down.circle"
+        case .installAPK: "shippingbox"
+        case .fileMutation: "folder.badge.gearshape"
+        case .appMutation: "square.stack.3d.up.badge.xmark"
+        case .export: "square.and.arrow.up"
+        case .capture: "camera.viewfinder"
+        }
+    }
+
+    private var tint: Color {
+        if case .failure = operation.outcome { return .red }
+        if case .success = operation.outcome { return .green }
+        return .accentColor
     }
 }

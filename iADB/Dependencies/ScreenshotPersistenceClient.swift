@@ -3,16 +3,140 @@ import ComposableArchitecture
 
 let screenshotStorageByteLimit = 100 * 1024 * 1024
 
+enum ScreenshotRetentionPolicy: String, CaseIterable, Codable, Equatable, Identifiable {
+    case unlimited
+    case compact
+    case standard
+    case extended
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .unlimited: String(localized: "No Limit")
+        case .compact: String(localized: "Compact")
+        case .standard: String(localized: "Standard")
+        case .extended: String(localized: "Extended")
+        }
+    }
+
+    var countLimit: Int {
+        switch self {
+        case .unlimited: Int.max
+        case .compact: 25
+        case .standard, .extended: 50
+        }
+    }
+
+    var byteLimit: Int {
+        switch self {
+        case .unlimited: Int.max
+        case .compact: 25 * 1024 * 1024
+        case .standard: 50 * 1024 * 1024
+        case .extended: screenshotStorageByteLimit
+        }
+    }
+
+    var detail: String {
+        self == .unlimited
+            ? String(localized: "No automatic cleanup")
+            : String(localized: "\(countLimit) captures · \(byteLimit / 1024 / 1024) MB")
+    }
+}
+
+struct ScreenshotRetentionClient: Sendable {
+    var load: @Sendable () -> ScreenshotRetentionPolicy
+    var save: @Sendable (ScreenshotRetentionPolicy) -> Void
+}
+
+extension ScreenshotRetentionClient: DependencyKey {
+    private static let key = "screenshotRetentionPolicy"
+
+    static var liveValue: Self {
+        Self(
+            load: {
+                // Legacy policies remain decodable, but current builds no longer remove captures
+                // automatically. The stored value is left intact for rollback compatibility.
+                .unlimited
+            },
+            save: { policy in UserDefaults.standard.set(policy.rawValue, forKey: key) }
+        )
+    }
+
+    static var previewValue: Self { Self(load: { .unlimited }, save: { _ in }) }
+    static var testValue: Self { Self(load: { .unlimited }, save: { _ in }) }
+}
+
 struct PersistedScreenshotEntry: Equatable, Codable {
     var id: UUID
     var timestamp: Date
     var fileName: String
+    var originDeviceID: String
+    var originDeviceName: String?
+    var pixelWidth: Int
+    var pixelHeight: Int
+    var byteCount: Int
+    var note: String?
+
+    init(
+        id: UUID,
+        timestamp: Date,
+        fileName: String,
+        originDeviceID: String = DeviceIdentity.unknownID,
+        originDeviceName: String? = nil,
+        pixelWidth: Int = 0,
+        pixelHeight: Int = 0,
+        byteCount: Int = 0,
+        note: String? = nil
+    ) {
+        self.id = id
+        self.timestamp = timestamp
+        self.fileName = fileName
+        self.originDeviceID = originDeviceID
+        self.originDeviceName = originDeviceName
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.byteCount = byteCount
+        self.note = note
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, timestamp, fileName, originDeviceID, originDeviceName
+        case pixelWidth, pixelHeight, byteCount, note
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        fileName = try container.decode(String.self, forKey: .fileName)
+        originDeviceID = try container.decodeIfPresent(String.self, forKey: .originDeviceID)
+            ?? DeviceIdentity.unknownID
+        originDeviceName = try container.decodeIfPresent(String.self, forKey: .originDeviceName)
+        pixelWidth = try container.decodeIfPresent(Int.self, forKey: .pixelWidth) ?? 0
+        pixelHeight = try container.decodeIfPresent(Int.self, forKey: .pixelHeight) ?? 0
+        byteCount = try container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0
+        note = try container.decodeIfPresent(String.self, forKey: .note)
+    }
+}
+
+struct ScreenshotMetadataEnvelope: Equatable, Codable {
+    static let currentVersion = 2
+
+    var version: Int
+    var entries: [PersistedScreenshotEntry]
+
+    init(version: Int = currentVersion, entries: [PersistedScreenshotEntry]) {
+        self.version = version
+        self.entries = entries
+    }
 }
 
 struct ScreenshotPersistenceBundle: Equatable {
     var metadata: [PersistedScreenshotEntry]
     var files: [UUID: Data]
     var warnings: [String] = []
+    var needsMigration = false
 }
 
 struct ScreenshotPersistenceClient: Sendable {
@@ -85,7 +209,7 @@ struct ScreenshotFileStore {
             guard let data = files[entry.id] else { throw CocoaError(.fileWriteUnknown) }
             try data.write(to: stagingURL.appendingPathComponent(entry.fileName), options: .atomic)
         }
-        let metadataData = try JSONEncoder().encode(metadata)
+        let metadataData = try JSONEncoder().encode(ScreenshotMetadataEnvelope(entries: metadata))
         try metadataData.write(
             to: stagingURL.appendingPathComponent(Self.metadataFileName),
             options: .atomic
@@ -146,7 +270,17 @@ struct ScreenshotFileStore {
 
     private func loadBundle(metadataURL: URL, filesDirectoryURL: URL) throws -> ScreenshotPersistenceBundle {
         let metadataData = try Data(contentsOf: metadataURL)
-        let metadata = try JSONDecoder().decode([PersistedScreenshotEntry].self, from: metadataData)
+        let decoder = JSONDecoder()
+        let metadata: [PersistedScreenshotEntry]
+        let usesLegacySchema: Bool
+        if let envelope = try? decoder.decode(ScreenshotMetadataEnvelope.self, from: metadataData),
+           envelope.version == ScreenshotMetadataEnvelope.currentVersion {
+            metadata = envelope.entries
+            usesLegacySchema = false
+        } else {
+            metadata = try decoder.decode([PersistedScreenshotEntry].self, from: metadataData)
+            usesLegacySchema = true
+        }
 
         var files: [UUID: Data] = [:]
         var warnings: [String] = []
@@ -180,7 +314,10 @@ struct ScreenshotFileStore {
         return ScreenshotPersistenceBundle(
             metadata: acceptedMetadata,
             files: files,
-            warnings: warnings
+            warnings: warnings,
+            needsMigration: usesLegacySchema || acceptedMetadata.contains {
+                $0.pixelWidth <= 0 || $0.pixelHeight <= 0 || $0.byteCount <= 0
+            }
         )
     }
 
@@ -269,5 +406,10 @@ extension DependencyValues {
     var screenshotPersistenceClient: ScreenshotPersistenceClient {
         get { self[ScreenshotPersistenceClient.self] }
         set { self[ScreenshotPersistenceClient.self] = newValue }
+    }
+
+    var screenshotRetentionClient: ScreenshotRetentionClient {
+        get { self[ScreenshotRetentionClient.self] }
+        set { self[ScreenshotRetentionClient.self] = newValue }
     }
 }

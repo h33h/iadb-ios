@@ -18,29 +18,29 @@ enum ADBError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConnected:
-            return "Not connected to device"
+            return String(localized: "Not connected to device")
         case .connectionFailed(let msg):
-            return "Connection failed: \(msg)"
+            return String(localized: "Connection failed: \(msg)")
         case .connectionClosed:
-            return "Connection closed by remote"
+            return String(localized: "Connection closed by remote")
         case .timeout:
-            return "Connection timed out"
+            return String(localized: "Connection timed out")
         case .sendFailed(let msg):
-            return "Send failed: \(msg)"
+            return String(localized: "Send failed: \(msg)")
         case .receiveFailed(let msg):
-            return "Receive failed: \(msg)"
+            return String(localized: "Receive failed: \(msg)")
         case .protocolError(let msg):
-            return "Protocol error: \(msg)"
+            return String(localized: "Protocol error: \(msg)")
         case .authenticationFailed:
-            return "Authentication failed — check device authorization"
+            return String(localized: "Authentication failed — check device authorization")
         case .cryptoError(let msg):
-            return "Crypto error: \(msg)"
+            return String(localized: "Crypto error: \(msg)")
         case .commandFailed(let msg):
-            return "Command failed: \(msg)"
+            return String(localized: "Command failed: \(msg)")
         case .fileTransferFailed(let msg):
-            return "File transfer failed: \(msg)"
+            return String(localized: "File transfer failed: \(msg)")
         case .invalidResponse(let msg):
-            return "Invalid response: \(msg)"
+            return String(localized: "Invalid response: \(msg)")
         }
     }
 }

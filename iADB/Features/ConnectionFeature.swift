@@ -140,6 +140,12 @@ struct ConnectionFeature {
         var validationError: String?
     }
 
+    struct SavedDeviceRename: Equatable {
+        let deviceID: UUID
+        var nameInput: String
+        var validationError: String?
+    }
+
     @ObservableState
     struct State: Equatable {
         var discoveredDevices: [DiscoveredDevice] = []
@@ -152,6 +158,7 @@ struct ConnectionFeature {
         var connectionGeneration = 0
         var activeConnectionGeneration: Int?
         var manualConnection: ManualConnection?
+        var savedDeviceRename: SavedDeviceRename?
         var pendingForgetDeviceID: UUID?
         var isResetIdentityConfirmationPresented = false
         @Presents var pairing: PairingFeature.State?
@@ -208,6 +215,10 @@ struct ConnectionFeature {
         case manualConnectionPortChanged(String)
         case dismissManualConnection
         case connectManualEndpoint
+        case requestRenamePairedDevice(id: UUID)
+        case savedDeviceRenameChanged(String)
+        case cancelRenamePairedDevice
+        case confirmRenamePairedDevice
         case requestForgetPairedDevice(id: UUID)
         case cancelForgetPairedDevice
         case confirmForgetPairedDevice
@@ -229,6 +240,7 @@ struct ConnectionFeature {
     @Dependency(\.adbClient) var adbClient
     @Dependency(\.pairedDevicesClient) var pairedDevicesClient
     @Dependency(\.deviceDiscoveryClient) var deviceDiscoveryClient
+    @Dependency(\.continuousClock) var clock
     #if DEBUG
     @Dependency(\.debugSettingsClient) var debugSettingsClient
     @Dependency(\.debugEmulatorClient) var debugEmulatorClient
@@ -345,8 +357,7 @@ struct ConnectionFeature {
                     return .none
                 }
                 guard !state.connectionState.isConnected else {
-                    state.lastConnectionError =
-                        "Disconnect the current device before connecting to another one."
+                    state.lastConnectionError = String(localized: "Disconnect the current device before connecting to another one.")
                     return .none
                 }
                 state.connectionState = .connecting
@@ -355,6 +366,7 @@ struct ConnectionFeature {
                 state.connectionGeneration += 1
                 let generation = state.connectionGeneration
                 state.activeConnectionGeneration = generation
+                PerformanceSignposts.connection("start")
 
                 return .merge(
                     .cancel(id: CancelID.connectionMonitor),
@@ -374,13 +386,18 @@ struct ConnectionFeature {
 
             case .cancelConnection:
                 guard state.connectionState == .connecting else { return .none }
+                let shouldDismissPairing = state.pairing?.phase == .connecting
                 state.connectionState = .disconnected
                 state.lastConnectionError = nil
                 state.activeConnectionGeneration = nil
-                return .merge(
+                var effects: [Effect<ConnectionFeature.Action>] = [
                     .cancel(id: CancelID.connection),
                     .run { _ in adbClient.disconnect() }
-                )
+                ]
+                if shouldDismissPairing {
+                    effects.append(.send(.pairing(.dismiss)))
+                }
+                return .merge(effects)
 
             case .disconnect:
                 state.connectionState = .disconnected
@@ -403,9 +420,11 @@ struct ConnectionFeature {
             case .connectionResult(let generation, .success):
                 guard state.connectionState == .connecting,
                       state.activeConnectionGeneration == generation else { return .none }
+                let shouldDismissPairing = state.pairing?.phase == .connecting
                 state.connectionState = .connected
                 state.lastConnectionError = nil
-                return .run { send in
+                PerformanceSignposts.connection("connected")
+                let monitorEffect: Effect<ConnectionFeature.Action> = .run { send in
                     for await event in adbClient.connectionEvents() {
                         switch event {
                         case .disconnected(let reason):
@@ -414,15 +433,30 @@ struct ConnectionFeature {
                     }
                 }
                 .cancellable(id: CancelID.connectionMonitor, cancelInFlight: true)
+                if shouldDismissPairing {
+                    return .merge(monitorEffect, .send(.pairing(.dismiss)))
+                }
+                return monitorEffect
 
             case .connectionResult(let generation, .failure(let error)):
                 guard state.connectionState == .connecting,
                       state.activeConnectionGeneration == generation else { return .none }
+                let shouldDismissPairing = state.pairing?.phase == .connecting
                 let message = error.localizedDescription
                 state.connectionState = .error(message)
                 state.lastConnectionError = message
                 state.activeConnectionGeneration = nil
-                return .none
+                if shouldDismissPairing,
+                   let device = state.lastConnectionDevice,
+                   let paired = State.pairedDevice(matching: device, in: state.pairedDevices) {
+                    state.manualConnection = ManualConnection(
+                        pairedDeviceID: paired.id,
+                        deviceName: paired.displayName,
+                        hostInput: device.host
+                    )
+                }
+                PerformanceSignposts.connection("failed")
+                return shouldDismissPairing ? .send(.pairing(.dismiss)) : .none
 
             case .connectionLost(let generation, let reason):
                 guard state.activeConnectionGeneration == generation,
@@ -432,6 +466,7 @@ struct ConnectionFeature {
                 state.connectionState = .error(reason)
                 state.lastConnectionError = reason
                 state.activeConnectionGeneration = nil
+                PerformanceSignposts.connection("lost")
                 return .merge(
                     .cancel(id: CancelID.connection),
                     .cancel(id: CancelID.connectionMonitor),
@@ -481,24 +516,21 @@ struct ConnectionFeature {
                 else { return .none }
 
                 guard !state.connectionState.isConnected else {
-                    manualConnection.validationError =
-                        "Disconnect the current device before connecting to another one."
+                    manualConnection.validationError = String(localized: "Disconnect the current device before connecting to another one.")
                     state.manualConnection = manualConnection
                     return .none
                 }
 
                 let host = manualConnection.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !host.isEmpty else {
-                    manualConnection.validationError =
-                        "Enter the IP address shown on Android's Wireless debugging screen."
+                    manualConnection.validationError = String(localized: "Enter the IP address shown on Android's Wireless debugging screen.")
                     state.manualConnection = manualConnection
                     return .none
                 }
                 guard let port = LocalizedDecimalInput.positiveUInt16(
                     manualConnection.portInput
                 ) else {
-                    manualConnection.validationError =
-                        "Enter a valid Wireless debugging port (1–65535), not the pairing port."
+                    manualConnection.validationError = String(localized: "Enter a valid Wireless debugging port (1–65535), not the pairing port.")
                     state.manualConnection = manualConnection
                     return .none
                 }
@@ -523,6 +555,65 @@ struct ConnectionFeature {
                     },
                     .send(.connectToDevice(device))
                 )
+
+            case .requestRenamePairedDevice(let id):
+                guard let pairedDevice = state.pairedDevices.first(where: { $0.id == id }) else {
+                    return .none
+                }
+                state.savedDeviceRename = SavedDeviceRename(
+                    deviceID: pairedDevice.id,
+                    nameInput: pairedDevice.displayName
+                )
+                return .none
+
+            case .savedDeviceRenameChanged(let name):
+                state.savedDeviceRename?.nameInput = name
+                state.savedDeviceRename?.validationError = nil
+                return .none
+
+            case .cancelRenamePairedDevice:
+                state.savedDeviceRename = nil
+                return .none
+
+            case .confirmRenamePairedDevice:
+                guard var rename = state.savedDeviceRename,
+                      let pairedIndex = state.pairedDevices.firstIndex(where: {
+                          $0.id == rename.deviceID
+                      })
+                else { return .none }
+
+                let name = rename.nameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else {
+                    rename.validationError = String(localized: "Enter a name for this saved device.")
+                    state.savedDeviceRename = rename
+                    return .none
+                }
+
+                let pairedDevicesBeforeRename = state.pairedDevices
+                let discoveredIndices = state.discoveredDevices.indices.filter { index in
+                    State.pairedDevice(
+                        matching: state.discoveredDevices[index],
+                        in: pairedDevicesBeforeRename
+                    )?.id == rename.deviceID
+                }
+                let isLastConnectionDevice = state.lastConnectionDevice.flatMap {
+                    State.pairedDevice(matching: $0, in: pairedDevicesBeforeRename)
+                }?.id == rename.deviceID
+
+                state.pairedDevices[pairedIndex].name = name
+                for index in discoveredIndices {
+                    state.discoveredDevices[index].name = name
+                }
+                if isLastConnectionDevice {
+                    state.lastConnectionDevice?.name = name
+                }
+                if state.manualConnection?.pairedDeviceID == rename.deviceID {
+                    state.manualConnection?.deviceName = name
+                }
+                state.savedDeviceRename = nil
+                return .run { [devices = state.pairedDevices] _ in
+                    pairedDevicesClient.save(devices)
+                }
 
             case .requestForgetPairedDevice(let id):
                 guard state.pairedDevices.contains(where: { $0.id == id }) else { return .none }
@@ -552,6 +643,9 @@ struct ConnectionFeature {
                 state.pairedDevices.removeAll { $0.id == id }
                 if state.manualConnection?.pairedDeviceID == id {
                     state.manualConnection = nil
+                }
+                if state.savedDeviceRename?.deviceID == id {
+                    state.savedDeviceRename = nil
                 }
                 for index in discoveredIndices {
                     state.discoveredDevices[index].isPaired = false
@@ -599,6 +693,7 @@ struct ConnectionFeature {
             case .resetADBIdentitySucceeded:
                 state.pairedDevices = []
                 state.manualConnection = nil
+                state.savedDeviceRename = nil
                 state.pendingForgetDeviceID = nil
                 state.pairing = nil
                 state.lastConnectionDevice = nil
@@ -610,9 +705,9 @@ struct ConnectionFeature {
                 return .send(.startDiscovery)
 
             case .resetADBIdentityFailed(let errorMessage):
-                state.lastConnectionError =
-                    "The ADB identity could not be removed. Unlock this iPhone or iPad and try again. "
-                    + errorMessage
+                state.lastConnectionError = String(
+                    localized: "The ADB identity could not be removed. Unlock this iPhone or iPad and try again. \(errorMessage)"
+                )
                 return .none
 
             #if DEBUG
@@ -680,20 +775,19 @@ struct ConnectionFeature {
                 let saveEffect: Effect<ConnectionFeature.Action> = .run { [devices = state.pairedDevices] _ in
                     pairedDevicesClient.save(devices)
                 }
-                let dismissEffect: Effect<ConnectionFeature.Action> = .send(.pairing(.dismiss))
                 if let device = connectDevice {
                     // Задержка нужна, чтобы adbd успел зарегистрировать новый ключ
                     // в trusted-list перед нашим TLS-подключением (race на commit).
                     let delayedConnect: Effect<ConnectionFeature.Action> = .run { send in
                         do {
-                            try await Task.sleep(nanoseconds: 1_500_000_000)
+                            try await clock.sleep(for: .seconds(1.5))
                         } catch {
                             return
                         }
                         await send(.connectToDevice(device))
                     }
                     .cancellable(id: CancelID.pairingAutoConnect, cancelInFlight: true)
-                    return .merge(saveEffect, dismissEffect, delayedConnect)
+                    return .merge(saveEffect, delayedConnect)
                 }
                 // The pairing endpoint is different from the normal Wireless
                 // debugging endpoint. Keep a visible next step instead of
@@ -703,7 +797,18 @@ struct ConnectionFeature {
                     deviceName: paired.displayName,
                     hostInput: host
                 )
-                return .merge(saveEffect, dismissEffect)
+                return .merge(saveEffect, .send(.pairing(.dismiss)))
+
+            case .pairing(.dismiss):
+                let shouldCancelConnection = state.pairing?.phase == .connecting
+                    && state.connectionState == .connecting
+                if shouldCancelConnection {
+                    return .merge(
+                        .cancel(id: CancelID.pairingAutoConnect),
+                        .send(.cancelConnection)
+                    )
+                }
+                return .cancel(id: CancelID.pairingAutoConnect)
 
             case .pairing:
                 return .none

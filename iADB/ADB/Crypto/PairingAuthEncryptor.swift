@@ -62,7 +62,7 @@ final class PairingAuthEncryptor {
         case invalidData
 
         var errorDescription: String? {
-            "Invalid encrypted pairing data"
+            String(localized: "Invalid encrypted pairing data")
         }
     }
 }

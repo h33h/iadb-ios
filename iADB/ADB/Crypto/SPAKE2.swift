@@ -237,8 +237,8 @@ struct SPAKE2Client {
 
         var errorDescription: String? {
             switch self {
-            case .randomGenerationFailed: return "Failed to generate random bytes"
-            case .invalidMessage(let m): return "SPAKE2 error: \(m)"
+            case .randomGenerationFailed: return String(localized: "Failed to generate random bytes")
+            case .invalidMessage(let m): return String(localized: "SPAKE2 error: \(m)")
             }
         }
     }

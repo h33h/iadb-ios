@@ -25,9 +25,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.receive(\.pairingCompleted) {
             $0.pairingState = .success("Paired with Pixel 7")
+            $0.phase = .connecting
             $0.pairedDeviceName = "Pixel 7"
             $0.pairedDeviceGUID = "pixel-guid"
         }
@@ -51,9 +53,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.receive(\.pairingResult.failure) {
             $0.pairingState = .error("Pairing was rejected by the device")
+            $0.phase = .idle
         }
     }
 
@@ -103,6 +107,7 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .error("Invalid port number")
+            $0.portValidationError = "Enter a Pairing port from 1 to 65535."
         }
     }
 
@@ -120,6 +125,7 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .error("Invalid pairing code")
+            $0.codeValidationError = "Enter the six-digit code shown on Android."
         }
     }
 
@@ -137,6 +143,7 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .error("Invalid port number")
+            $0.portValidationError = "Enter a Pairing port from 1 to 65535."
         }
     }
 
@@ -158,9 +165,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.receive(\.pairingResult.failure) {
             $0.pairingState = .error("Pairing timed out")
+            $0.phase = .idle
         }
     }
 
@@ -182,9 +191,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.receive(\.pairingResult.failure) {
             $0.pairingState = .error("TLS handshake failed: unknown certificate")
+            $0.phase = .idle
         }
     }
 
@@ -208,9 +219,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.receive(\.pairingResult.failure) {
             $0.pairingState = .error("Pairing connection failed: Connection stuck (Network.NWError). Check that Local Network permission is granted and both devices are on the same WiFi.")
+            $0.phase = .idle
         }
     }
 
@@ -256,9 +269,11 @@ struct PairingFeatureTests {
 
         await store.send(.pairWithCode) {
             $0.pairingState = .pairing
+            $0.phase = .negotiating
         }
         await store.send(.cancelPairing) {
             $0.pairingState = .idle
+            $0.phase = .idle
         }
         await Task.yield()
         #expect(didCancel.value)

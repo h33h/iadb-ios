@@ -42,6 +42,25 @@ final class AppInfoTests: XCTestCase {
         XCTAssertEqual(set.count, 2)
     }
 
+    func testAppDetailParsesPathsAndPermissionState() {
+        let detail = AppDetail.parse(
+            packageName: "com.example.app",
+            rawText: """
+            codePath=/data/app/com.example.app/base.apk
+            dataDir=/data/user/0/com.example.app
+              android.permission.CAMERA: granted=true
+              android.permission.POST_NOTIFICATIONS: granted=false
+            """
+        )
+
+        XCTAssertEqual(detail.sourcePath, "/data/app/com.example.app/base.apk")
+        XCTAssertEqual(detail.dataPath, "/data/user/0/com.example.app")
+        XCTAssertEqual(detail.permissions, [
+            "android.permission.CAMERA — granted",
+            "android.permission.POST_NOTIFICATIONS — denied",
+        ])
+    }
+
     // MARK: - LogEntry
 
     func testLogEntryParseStandard() {

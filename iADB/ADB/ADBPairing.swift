@@ -60,13 +60,13 @@ final class ADBPairing: @unchecked Sendable {
 
         var errorDescription: String? {
             switch self {
-            case .invalidCode: return "Invalid pairing code"
-            case .connectionFailed(let m): return "Pairing connection failed: \(m)"
-            case .tlsFailed(let m): return "TLS handshake failed: \(m)"
-            case .pairingRejected: return "Pairing was rejected by the device"
-            case .timeout: return "Pairing timed out"
-            case .spake2Failed(let m): return "SPAKE2 key exchange failed: \(m)"
-            case .protocolError(let m): return "Pairing protocol error: \(m)"
+            case .invalidCode: return String(localized: "Invalid pairing code")
+            case .connectionFailed(let m): return String(localized: "Pairing connection failed: \(m)")
+            case .tlsFailed(let m): return String(localized: "TLS handshake failed: \(m)")
+            case .pairingRejected: return String(localized: "Pairing was rejected by the device")
+            case .timeout: return String(localized: "Pairing timed out")
+            case .spake2Failed(let m): return String(localized: "SPAKE2 key exchange failed: \(m)")
+            case .protocolError(let m): return String(localized: "Pairing protocol error: \(m)")
             }
         }
     }

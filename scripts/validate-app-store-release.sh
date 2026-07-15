@@ -278,7 +278,7 @@ check_set() {
 check_screenshots() {
   printf '\nScreenshots\n'
   check_set app-store/screenshots/iphone-6.9 "iPhone 6.9-inch" 1320 2868
-  check_set app-store/screenshots/ipad-13 "iPad 13-inch" 2752 2064
+  check_set app-store/screenshots/ipad-13 "iPad 13-inch" 2064 2752
   warn "Inspect screenshot pixels by eye; this offline validator does not run OCR"
 }
 

@@ -4,6 +4,11 @@ import Testing
 
 struct ScreenshotPersistenceClientTests {
     @Test
+    func legacyRetentionPreferenceNoLongerEnablesAutomaticCleanup() {
+        #expect(ScreenshotRetentionClient.liveValue.load() == .unlimited)
+    }
+
+    @Test
     func failedSaveKeepsLastCommittedGenerationReadable() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("iadb-screenshot-store-\(UUID().uuidString)", isDirectory: true)
@@ -126,5 +131,57 @@ struct ScreenshotPersistenceClientTests {
         #expect(loaded.metadata == [metadata[0]])
         #expect(loaded.files == [firstID: Data([1, 2, 3])])
         #expect(loaded.warnings == [sharedFileName])
+        #expect(loaded.needsMigration)
+    }
+
+    @Test
+    func legacyMetadataMigratesToVersionedEnvelopeWithoutInventingOrigin() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iadb-screenshot-migration-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+
+        struct LegacyEntry: Codable {
+            var id: UUID
+            var timestamp: Date
+            var fileName: String
+        }
+
+        let id = UUID(0)
+        let fileName = "legacy.png"
+        let legacyData = Data([1, 2, 3])
+        let legacyMetadata = [LegacyEntry(
+            id: id,
+            timestamp: Date(timeIntervalSince1970: 10),
+            fileName: fileName
+        )]
+        try JSONEncoder().encode(legacyMetadata).write(
+            to: root.appendingPathComponent("screenshots.json"),
+            options: .atomic
+        )
+        try legacyData.write(to: root.appendingPathComponent(fileName), options: .atomic)
+
+        let store = ScreenshotFileStore(directoryURL: root)
+        let legacy = try store.load()
+        #expect(legacy.needsMigration)
+        #expect(legacy.metadata.first?.originDeviceID == DeviceIdentity.unknownID)
+
+        let migrated = legacy.metadata.map {
+            PersistedScreenshotEntry(
+                id: $0.id,
+                timestamp: $0.timestamp,
+                fileName: $0.fileName,
+                originDeviceID: $0.originDeviceID,
+                pixelWidth: 1,
+                pixelHeight: 1,
+                byteCount: legacyData.count
+            )
+        }
+        try store.save(migrated, legacy.files)
+
+        let reloaded = try store.load()
+        #expect(!reloaded.needsMigration)
+        #expect(reloaded.metadata == migrated)
+        #expect(reloaded.files[id] == legacyData)
     }
 }

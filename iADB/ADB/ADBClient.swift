@@ -1,5 +1,19 @@
 import Foundation
 
+struct TransferProgress: Equatable, Sendable {
+    let completedUnits: Int64
+    let totalUnits: Int64?
+}
+
+enum ShellEvent: Equatable, Sendable {
+    case stdout(Data)
+    case stderr(Data)
+    case exit(Int32)
+    /// Older adbd versions cannot separate stderr or deliver live output
+    /// without exposing the marker used to recover the exit status.
+    case legacyFallback
+}
+
 /// Quote one argument for Android's POSIX-compatible shell.
 ///
 /// The result is safe to concatenate into a command string, including for
@@ -202,6 +216,133 @@ extension ADBClient {
             where message.hasPrefix("Stream rejected for:") {
             return try await legacyShell(command)
         }
+    }
+
+    /// Opens one command session and emits shell-v2 stdout, stderr and exit
+    /// packets in transport order. Devices without shell v2 use a bounded,
+    /// explicitly marked legacy fallback.
+    func openShellCommand(
+        _ command: String
+    ) async throws -> AsyncThrowingStream<ShellEvent, Error> {
+        do {
+            let stream = try await openStream(destination: "shell,v2,raw:\(command)")
+            return shellV2EventStream(stream)
+        } catch ADBError.commandFailed(let message)
+            where message.hasPrefix("Stream rejected for:") {
+            return try await openLegacyShellCommand(command)
+        }
+    }
+
+    private func shellV2EventStream(
+        _ stream: ADBStream
+    ) -> AsyncThrowingStream<ShellEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                let decoder = ShellV2Decoder()
+                do {
+                    while true {
+                        try Task.checkCancellation()
+                        let message = try await stream.readMessage()
+                        switch message.commandType {
+                        case .write:
+                            try await stream.sendReady()
+                            decoder.append(message.data)
+                            for packet in try decoder.takePackets() {
+                                switch packet.id {
+                                case .stdout:
+                                    continuation.yield(.stdout(packet.data))
+                                case .stderr:
+                                    continuation.yield(.stderr(packet.data))
+                                case .exit:
+                                    guard let code = packet.exitCode,
+                                          let exitCode = Int32(exactly: code) else {
+                                        throw ADBError.protocolError("Malformed shell v2 EXIT packet")
+                                    }
+                                    continuation.yield(.exit(exitCode))
+                                    try await stream.close()
+                                    continuation.finish()
+                                    return
+                                default:
+                                    continue
+                                }
+                            }
+                        case .close:
+                            await stream.acknowledgeRemoteClose()
+                            throw ADBError.protocolError("shell,v2 closed without an EXIT packet")
+                        default:
+                            continue
+                        }
+                    }
+                } catch is CancellationError {
+                    try? await stream.close()
+                    continuation.finish()
+                } catch {
+                    try? await stream.close()
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func openLegacyShellCommand(
+        _ command: String
+    ) async throws -> AsyncThrowingStream<ShellEvent, Error> {
+        let marker = "__IADB_EXIT_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
+        let script = "\(command)\nstatus=$?\nprintf '\n\(marker)%d\n' \"$status\""
+        let stream = try await openStream(destination: "shell:sh -c \(adbShellQuote(script))")
+        return AsyncThrowingStream { continuation in
+            let task = Task {
+                var output = Data()
+                continuation.yield(.legacyFallback)
+                do {
+                    while true {
+                        try Task.checkCancellation()
+                        let message = try await stream.readMessage()
+                        switch message.commandType {
+                        case .write:
+                            try appendShellOutput(message.data, to: &output)
+                            try await stream.sendReady()
+                        case .close:
+                            await stream.acknowledgeRemoteClose()
+                            let result = try legacyShellResult(output, marker: marker)
+                            if !result.output.isEmpty {
+                                continuation.yield(.stdout(result.output))
+                            }
+                            continuation.yield(.exit(result.exitCode))
+                            continuation.finish()
+                            return
+                        default:
+                            continue
+                        }
+                    }
+                } catch is CancellationError {
+                    try? await stream.close()
+                    continuation.finish()
+                } catch {
+                    try? await stream.close()
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private func legacyShellResult(
+        _ data: Data,
+        marker: String
+    ) throws -> (output: Data, exitCode: Int32) {
+        guard let raw = String(data: data, encoding: .utf8),
+              let markerRange = raw.range(of: marker, options: .backwards) else {
+            throw ADBError.protocolError("Legacy shell response did not include an exit status")
+        }
+        let statusText = raw[markerRange.upperBound...].prefix { $0.isNumber || $0 == "-" }
+        guard let status = Int32(String(statusText)) else {
+            throw ADBError.protocolError("Legacy shell returned an invalid exit status")
+        }
+        let output = String(raw[..<markerRange.lowerBound])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (Data(output.utf8), status)
     }
 
     private func shellV2(_ command: String) async throws -> String {
@@ -494,16 +635,26 @@ extension ADBClient {
 
     /// Stream a local file to adbd without loading the whole file into memory.
     func pushFile(from localURL: URL, to remotePath: String, mode: UInt32 = 0o644) async throws {
+        try await pushFile(from: localURL, to: remotePath, mode: mode) { _ in }
+    }
+
+    func pushFile(
+        from localURL: URL,
+        to remotePath: String,
+        mode: UInt32 = 0o644,
+        progress: @Sendable (TransferProgress) async -> Void
+    ) async throws {
         let handle = try FileHandle(forReadingFrom: localURL)
         defer { try? handle.close() }
-        try await pushContent(to: remotePath, mode: mode) {
+        let totalUnits = try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize.map(Int64.init)
+        try await pushContent(to: remotePath, mode: mode, totalUnits: totalUnits ?? nil, progress: progress) {
             try handle.read(upToCount: Self.syncChunkSize)
         }
     }
 
     func pushData(_ data: Data, to remotePath: String, mode: UInt32 = 0o644) async throws {
         var offset = 0
-        try await pushContent(to: remotePath, mode: mode) {
+        try await pushContent(to: remotePath, mode: mode, totalUnits: Int64(data.count), progress: { _ in }) {
             guard offset < data.count else { return nil }
             let end = min(offset + Self.syncChunkSize, data.count)
             defer { offset = end }
@@ -514,6 +665,8 @@ extension ADBClient {
     private func pushContent(
         to remotePath: String,
         mode: UInt32,
+        totalUnits: Int64?,
+        progress: @Sendable (TransferProgress) async -> Void,
         nextChunk: () throws -> Data?
     ) async throws {
         let stream = try await openStream(destination: "sync:")
@@ -524,6 +677,7 @@ extension ADBClient {
                 over: stream
             )
 
+            var completedUnits: Int64 = 0
             while let chunk = try nextChunk(), !chunk.isEmpty {
                 try Task.checkCancellation()
                 guard chunk.count <= Self.syncChunkSize else {
@@ -533,6 +687,11 @@ extension ADBClient {
                     SyncFrame.encoded(id: .data, value: UInt32(chunk.count), data: chunk),
                     over: stream
                 )
+                completedUnits += Int64(chunk.count)
+                await progress(TransferProgress(
+                    completedUnits: completedUnits,
+                    totalUnits: totalUnits
+                ))
             }
 
             let modificationTime = UInt32(clamping: Int(Date().timeIntervalSince1970))
@@ -580,6 +739,14 @@ extension ADBClient {
     /// Stream a remote file directly to disk. A temporary file is moved into
     /// place only after a complete SYNC DONE response.
     func pullFile(remotePath: String, to localURL: URL) async throws {
+        try await pullFile(remotePath: remotePath, to: localURL) { _ in }
+    }
+
+    func pullFile(
+        remotePath: String,
+        to localURL: URL,
+        progress: @Sendable (TransferProgress) async -> Void
+    ) async throws {
         let temporaryURL = localURL.deletingLastPathComponent()
             .appendingPathComponent(".iadb-\(UUID().uuidString).download")
         guard FileManager.default.createFile(atPath: temporaryURL.path, contents: nil) else {
@@ -589,8 +756,11 @@ extension ADBClient {
 
         let handle = try FileHandle(forWritingTo: temporaryURL)
         do {
+            var completedUnits: Int64 = 0
             try await pullContent(from: remotePath) { chunk in
                 try handle.write(contentsOf: chunk)
+                completedUnits += Int64(chunk.count)
+                await progress(TransferProgress(completedUnits: completedUnits, totalUnits: nil))
             }
             try handle.close()
             if FileManager.default.fileExists(atPath: localURL.path) {
@@ -606,7 +776,7 @@ extension ADBClient {
 
     private func pullContent(
         from remotePath: String,
-        consume: (Data) throws -> Void
+        consume: (Data) async throws -> Void
     ) async throws {
         let stream = try await openStream(destination: "sync:")
         do {
@@ -622,7 +792,7 @@ extension ADBClient {
                 let frame = try await receiveSyncFrame(over: stream, decoder: decoder)
                 switch frame.id {
                 case .data:
-                    try consume(frame.data)
+                    try await consume(frame.data)
                 case .done:
                     try await stream.close()
                     return

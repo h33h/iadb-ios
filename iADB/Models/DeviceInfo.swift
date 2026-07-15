@@ -14,37 +14,52 @@ struct DeviceDetails: Equatable {
     var ipAddress: String = ""
     var totalMemory: String = ""
     var availableMemory: String = ""
+    var totalStorage: String = ""
+    var availableStorage: String = ""
     var cpuAbi: String = ""
     var deviceName: String = ""
 
     var displayTitle: String {
         if !model.isEmpty { return model }
-        return "Android Device"
+        return String(localized: "Android Device")
+    }
+
+    var localizedBatteryStatus: String {
+        switch batteryStatus {
+        case "Charging": String(localized: "Charging")
+        case "Discharging": String(localized: "Discharging")
+        case "Not charging": String(localized: "Not charging")
+        case "Full": String(localized: "Full")
+        case "Unknown": String(localized: "Unknown")
+        default: batteryStatus
+        }
     }
 
     var snapshotText: String {
         let sections: [(String, [(String, String)])] = [
-            ("Identity", [
-                ("Model", model),
-                ("Manufacturer", manufacturer),
-                ("Device Name", deviceName),
-                ("Serial Number", serialNumber),
+            (String(localized: "Identity"), [
+                (String(localized: "Model"), model),
+                (String(localized: "Manufacturer"), manufacturer),
+                (String(localized: "Device Name"), deviceName),
+                (String(localized: "Serial Number"), serialNumber),
             ]),
-            ("System", [
-                ("Android Version", androidVersion),
-                ("SDK Level", sdkVersion),
-                ("CPU ABI", cpuAbi),
-                ("Build", buildFingerprint),
+            (String(localized: "System"), [
+                (String(localized: "Android Version"), androidVersion),
+                (String(localized: "SDK Level"), sdkVersion),
+                (String(localized: "CPU ABI"), cpuAbi),
+                (String(localized: "Build"), buildFingerprint),
             ]),
-            ("Hardware", [
-                ("Battery Level", batteryLevel),
-                ("Battery Status", batteryStatus),
-                ("Screen", screenResolution),
-                ("RAM Total", totalMemory),
-                ("RAM Available", availableMemory),
+            (String(localized: "Hardware"), [
+                (String(localized: "Battery Level"), batteryLevel),
+                (String(localized: "Battery Status"), localizedBatteryStatus),
+                (String(localized: "Screen"), screenResolution),
+                (String(localized: "RAM Total"), totalMemory),
+                (String(localized: "RAM Available"), availableMemory),
+                (String(localized: "Storage Total"), totalStorage),
+                (String(localized: "Storage Available"), availableStorage),
             ]),
-            ("Network", [
-                ("IP Address", ipAddress),
+            (String(localized: "Network"), [
+                (String(localized: "IP Address"), ipAddress),
             ]),
         ]
 
@@ -144,10 +159,10 @@ enum ConnectionState: Equatable {
 
     var statusText: String {
         switch self {
-        case .disconnected: return "Disconnected"
-        case .connecting: return "Connecting..."
-        case .connected: return "Connected"
-        case .error(let msg): return "Error: \(msg)"
+        case .disconnected: return String(localized: "Disconnected")
+        case .connecting: return String(localized: "Connecting...")
+        case .connected: return String(localized: "Connected")
+        case .error(let msg): return String(localized: "Error: \(msg)")
         }
     }
 

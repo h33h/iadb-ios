@@ -139,7 +139,7 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
 
         @unknown default:
             yield(
-                .failure("Device discovery stopped unexpectedly. Tap Rescan to try again."),
+                .failure(String(localized: "Device discovery stopped unexpectedly. Tap Rescan to try again.")),
                 runID: runID
             )
         }
@@ -147,10 +147,11 @@ final class ADBDeviceDiscovery: @unchecked Sendable {
 
     private static func discoveryMessage(for error: NWError) -> String {
         if case .posix(let code) = error, code == .EPERM {
-            return "Local Network access is disabled. Allow it in Settings, then tap Rescan."
+            return String(localized: "Local Network access is disabled. Allow it in Settings, then tap Rescan.")
         }
-        return "Wireless debugging discovery is unavailable: \(error.localizedDescription). "
-            + "Check Wi-Fi and Local Network access, then tap Rescan."
+        return String(
+            localized: "Wireless debugging discovery is unavailable: \(error.localizedDescription). Check Wi-Fi and Local Network access, then tap Rescan."
+        )
     }
 
     private func yield(_ event: DeviceDiscoveryEvent, runID: UUID) {

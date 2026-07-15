@@ -5,13 +5,15 @@ import ComposableArchitecture
 struct DeviceInfoFeature {
     enum ErrorRecovery: Equatable {
         case fetch
-        case reboot(String)
     }
 
     @ObservableState
     struct State: Equatable {
+        var remoteTarget = RemoteDeviceTarget.unavailable
         var details = DeviceDetails()
         var isLoading = false
+        var fetchGeneration = 0
+        var activeFetchGeneration: Int?
         var isRebooting = false
         var errorMessage: String?
         var rebootStatusMessage: String?
@@ -21,8 +23,8 @@ struct DeviceInfoFeature {
 
     enum Action {
         case fetchDeviceInfo
-        case deviceInfoLoaded(Result<DeviceDetails, Error>)
-        case reboot(mode: String)
+        case deviceInfoLoaded(generation: Int, Result<DeviceDetails, Error>)
+        case reboot(mode: String, confirmation: DestructiveActionConfirmation?)
         case rebootResult(Result<Void, Error>)
         case retryError
         case dismissError
@@ -38,6 +40,9 @@ struct DeviceInfoFeature {
             switch action {
             case .fetchDeviceInfo:
                 state.isLoading = true
+                state.fetchGeneration += 1
+                let generation = state.fetchGeneration
+                state.activeFetchGeneration = generation
                 state.errorMessage = nil
                 state.errorRecovery = nil
 
@@ -81,6 +86,12 @@ struct DeviceInfoFeature {
                         }
                     }
 
+                    if let storageOutput = try? await adbClient.shell("df -k /data"),
+                       let storage = Self.storageValues(from: storageOutput) {
+                        details.totalStorage = storage.total
+                        details.availableStorage = storage.available
+                    }
+
                     if let statusOutput = try? await adbClient.shell("dumpsys battery | grep status"),
                        let statusRange = statusOutput.range(of: "\\d+", options: .regularExpression) {
                         let code = Int(statusOutput[statusRange]) ?? 0
@@ -93,26 +104,35 @@ struct DeviceInfoFeature {
                         }
                     }
 
-                    await send(.deviceInfoLoaded(.success(details)))
+                    await send(.deviceInfoLoaded(generation: generation, .success(details)))
                 } catch: { error, send in
                     guard !(error is CancellationError) else { return }
-                    await send(.deviceInfoLoaded(.failure(error)))
+                    await send(.deviceInfoLoaded(generation: generation, .failure(error)))
                 }
                 .cancellable(id: CancelID.fetchInfo, cancelInFlight: true)
 
-            case .deviceInfoLoaded(.success(let details)):
+            case .deviceInfoLoaded(let generation, .success(let details)):
+                guard state.activeFetchGeneration == generation else { return .none }
                 state.isLoading = false
+                state.activeFetchGeneration = nil
                 state.details = details
                 state.errorRecovery = nil
                 return .none
 
-            case .deviceInfoLoaded(.failure(let error)):
+            case .deviceInfoLoaded(let generation, .failure(let error)):
+                guard state.activeFetchGeneration == generation else { return .none }
                 state.isLoading = false
+                state.activeFetchGeneration = nil
                 state.errorMessage = error.localizedDescription
                 state.errorRecovery = .fetch
                 return .none
 
-            case .reboot(let mode):
+            case .reboot(let mode, let confirmation):
+                guard let confirmation,
+                      state.remoteTarget.accepts(confirmation, objectID: "reboot:\(mode)") else {
+                    state.errorMessage = String(localized: "The target device changed. Confirm Reboot again on the connected device.")
+                    return .none
+                }
                 guard !state.isRebooting else { return .none }
                 state.isRebooting = true
                 state.errorMessage = nil
@@ -131,20 +151,21 @@ struct DeviceInfoFeature {
             case .rebootResult(.success):
                 state.isRebooting = false
                 state.activeRebootMode = nil
-                state.rebootStatusMessage = "Reboot command sent. Waiting for the device to come back online…"
+                state.rebootStatusMessage = String(localized: "Reboot command sent. Waiting for the device to come back online…")
                 return .none
 
             case .rebootResult(.failure(let error)):
                 state.isRebooting = false
                 state.errorMessage = error.localizedDescription
-                state.errorRecovery = .reboot(state.activeRebootMode ?? "")
+                // Reboot is destructive to the current session. Never offer an
+                // automatic retry: the user must confirm the current target.
+                state.errorRecovery = nil
                 state.activeRebootMode = nil
                 return .none
 
             case .retryError:
                 switch state.errorRecovery {
                 case .fetch: return .send(.fetchDeviceInfo)
-                case .reboot(let mode): return .send(.reboot(mode: mode))
                 case nil: return .none
                 }
 
@@ -155,6 +176,7 @@ struct DeviceInfoFeature {
 
             case .cancelAll:
                 state.isLoading = false
+                state.activeFetchGeneration = nil
                 state.isRebooting = false
                 state.activeRebootMode = nil
                 return .merge(
@@ -173,5 +195,23 @@ struct DeviceInfoFeature {
 
         let sourceField = routeOutput[sourceRange]
         return sourceField.split(whereSeparator: \.isWhitespace).last.map(String.init)
+    }
+
+    static func storageValues(from output: String) -> (total: String, available: String)? {
+        for line in output.split(whereSeparator: \.isNewline).reversed() {
+            let fields = line.split(whereSeparator: \.isWhitespace)
+            guard fields.count >= 4,
+                  let totalKB = Int64(fields[1]),
+                  let availableKB = Int64(fields[3]) else { continue }
+            return (
+                formatStorage(bytes: totalKB * 1_024),
+                formatStorage(bytes: availableKB * 1_024)
+            )
+        }
+        return nil
+    }
+
+    private static func formatStorage(bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 }

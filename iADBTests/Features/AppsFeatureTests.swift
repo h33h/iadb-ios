@@ -11,16 +11,19 @@ struct AppsFeatureTests {
             AppsFeature()
         } withDependencies: {
             $0.adbClient.listPackages = { _ in ["com.example.app1", "com.example.app2"] }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
         }
 
         await store.send(.loadApps) {
             $0.isLoading = true
+            $0.listGeneration = 1
+            $0.activeListGeneration = 1
             $0.errorMessage = nil
         }
 
         // AppInfo generates UUID on init, can't match exactly
         store.exhaustivity = .off
-        await store.receive(\.appsLoaded.success)
+        await store.receive(\.appsLoaded)
         store.exhaustivity = .on
 
         #expect(store.state.isLoading == false)
@@ -35,15 +38,19 @@ struct AppsFeatureTests {
             AppsFeature()
         } withDependencies: {
             $0.adbClient.listPackages = { _ in throw ADBError.notConnected }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
         }
 
         await store.send(.loadApps) {
             $0.isLoading = true
+            $0.listGeneration = 1
+            $0.activeListGeneration = 1
             $0.errorMessage = nil
         }
 
-        await store.receive(\.appsLoaded.failure) {
+        await store.receive(\.appsLoaded) {
             $0.isLoading = false
+            $0.activeListGeneration = nil
             $0.errorMessage = ADBError.notConnected.localizedDescription
         }
     }
@@ -52,17 +59,23 @@ struct AppsFeatureTests {
     func uninstallSuccess() async {
         let app = AppInfo(packageName: "com.test.app", isSystemApp: false)
         let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000061")!
+        let target = Self.connectedTarget()
         let store = TestStore(
-            initialState: AppsFeature.State(apps: [app])
+            initialState: AppsFeature.State(remoteTarget: target, apps: [app])
         ) {
             AppsFeature()
         } withDependencies: {
             $0.adbClient.uninstallPackage = { _, _ in "Success" }
             $0.adbClient.listPackages = { _ in [] }
             $0.uuid = .constant(operationID)
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
         }
 
-        await store.send(.uninstall(app, keepData: false)) {
+        await store.send(.uninstall(
+            app,
+            keepData: false,
+            confirmation: target.confirmation(for: app.packageName)
+        )) {
             $0.activeOperation = AppsFeature.ActiveOperation(
                 id: operationID,
                 packageName: app.packageName,
@@ -79,12 +92,19 @@ struct AppsFeatureTests {
 
         await store.receive(\.loadApps) {
             $0.isLoading = true
+            $0.listGeneration = 1
+            $0.activeListGeneration = 1
             $0.errorMessage = nil
         }
 
-        await store.receive(\.appsLoaded.success) {
+        await store.receive(\.appsLoaded) {
             $0.isLoading = false
+            $0.activeListGeneration = nil
             $0.apps = []
+            $0.listSnapshot = AppsFeature.ListSnapshotMetadata(
+                deviceID: target.deviceID,
+                fetchedAt: Date(timeIntervalSince1970: 1_000)
+            )
         }
     }
 
@@ -116,14 +136,18 @@ struct AppsFeatureTests {
     func clearDataSuccess() async {
         let app = AppInfo(packageName: "com.test.app", isSystemApp: false)
         let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000063")!
-        let store = TestStore(initialState: AppsFeature.State()) {
+        let target = Self.connectedTarget()
+        let store = TestStore(initialState: AppsFeature.State(remoteTarget: target)) {
             AppsFeature()
         } withDependencies: {
             $0.adbClient.clearAppData = { _ in "Success" }
             $0.uuid = .constant(operationID)
         }
 
-        await store.send(.clearData(app)) {
+        await store.send(.clearData(
+            app,
+            confirmation: target.confirmation(for: app.packageName)
+        )) {
             $0.activeOperation = AppsFeature.ActiveOperation(id: operationID, packageName: app.packageName, kind: .clearData)
             $0.statusMessage = nil
             $0.errorMessage = nil
@@ -150,11 +174,13 @@ struct AppsFeatureTests {
             $0.isLoadingDetail = true
             $0.activeAppDetailID = detailID
             $0.activeAppDetailPackageName = app.packageName
+            $0.activeAppDetailDeviceID = DeviceIdentity.unknownID
         }
         await store.receive(\.appDetailLoaded) {
             $0.isLoadingDetail = false
             $0.activeAppDetailID = nil
             $0.activeAppDetailPackageName = nil
+            $0.activeAppDetailDeviceID = nil
             $0.appDetailText = "versionName=1.0\nversionCode=42\ntargetSdk=34\nfirstInstallTime=2024-01-01\nlastUpdateTime=2024-01-02\npkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]"
             $0.appDetail = AppDetail(
                 packageName: "com.test.app",
@@ -164,6 +190,9 @@ struct AppsFeatureTests {
                 firstInstallTime: "2024-01-01",
                 lastUpdateTime: "2024-01-02",
                 installerPackage: nil,
+                sourcePath: nil,
+                dataPath: nil,
+                permissions: [],
                 flags: ["HAS_CODE", "ALLOW_CLEAR_USER_DATA"],
                 rawText: "versionName=1.0\nversionCode=42\ntargetSdk=34\nfirstInstallTime=2024-01-01\nlastUpdateTime=2024-01-02\npkgFlags=[ HAS_CODE ALLOW_CLEAR_USER_DATA ]"
             )
@@ -194,6 +223,7 @@ struct AppsFeatureTests {
             $0.isLoadingDetail = true
             $0.activeAppDetailID = detailID
             $0.activeAppDetailPackageName = first.packageName
+            $0.activeAppDetailDeviceID = DeviceIdentity.unknownID
         }
         await store.send(.getAppDetail(second)) {
             $0.selectedApp = second
@@ -218,7 +248,8 @@ struct AppsFeatureTests {
             selectedApp: second,
             isLoadingDetail: true,
             activeAppDetailID: secondID,
-            activeAppDetailPackageName: second.packageName
+            activeAppDetailPackageName: second.packageName,
+            activeAppDetailDeviceID: DeviceIdentity.unknownID
         )) {
             AppsFeature()
         }
@@ -226,6 +257,8 @@ struct AppsFeatureTests {
         await store.send(.appDetailLoaded(
             id: firstID,
             packageName: first.packageName,
+            deviceID: DeviceIdentity.unknownID,
+            showsSheet: true,
             .success("versionName=stale")
         ))
         #expect(store.state.isLoadingDetail)
@@ -234,11 +267,14 @@ struct AppsFeatureTests {
         await store.send(.appDetailLoaded(
             id: secondID,
             packageName: second.packageName,
+            deviceID: DeviceIdentity.unknownID,
+            showsSheet: true,
             .success("versionName=2.0")
         )) {
             $0.isLoadingDetail = false
             $0.activeAppDetailID = nil
             $0.activeAppDetailPackageName = nil
+            $0.activeAppDetailDeviceID = nil
             $0.appDetailText = "versionName=2.0"
             $0.appDetail = AppDetail.parse(
                 packageName: second.packageName,
@@ -276,7 +312,9 @@ struct AppsFeatureTests {
         let staleID = UUID(uuidString: "00000000-0000-0000-0000-000000000066")!
         let app = AppInfo(packageName: "com.test.app")
         let active = AppsFeature.ActiveOperation(id: currentID, packageName: app.packageName, kind: .clearData)
-        let store = TestStore(initialState: AppsFeature.State(activeOperation: active)) {
+        let store = TestStore(initialState: AppsFeature.State(
+            operationsByPackage: [app.packageName: active]
+        )) {
             AppsFeature()
         }
 
@@ -364,6 +402,7 @@ struct AppsFeatureTests {
             $0.adbClient.pushData = { _, _, _ in }
             $0.adbClient.shell = { _ in "Success" }
             $0.adbClient.listPackages = { _ in [] }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
             $0.uuid = .constant(installID)
         }
 
@@ -374,10 +413,12 @@ struct AppsFeatureTests {
             $0.activeInstallID = installID
             $0.activeInstallRemotePath = remotePath
         }
+        await store.receive(\.delegate)
 
         await store.receive(\.installProgressChanged) {
             $0.installProgress = "Installing APK..."
         }
+        await store.receive(\.delegate)
 
         await store.receive(\.installSucceeded) {
             $0.isInstalling = false
@@ -386,14 +427,22 @@ struct AppsFeatureTests {
             $0.activeInstallRemotePath = nil
             $0.statusMessage = "Success"
         }
+        await store.receive(\.delegate)
 
         await store.receive(\.loadApps) {
             $0.isLoading = true
+            $0.listGeneration = 1
+            $0.activeListGeneration = 1
             $0.errorMessage = nil
         }
 
-        await store.receive(\.appsLoaded.success) {
+        await store.receive(\.appsLoaded) {
             $0.isLoading = false
+            $0.activeListGeneration = nil
+            $0.listSnapshot = AppsFeature.ListSnapshotMetadata(
+                deviceID: DeviceIdentity.unknownID,
+                fetchedAt: Date(timeIntervalSince1970: 1_000)
+            )
         }
     }
 
@@ -409,6 +458,7 @@ struct AppsFeatureTests {
             $0.adbClient.pushFile = { url, _, _ in receivedURL.setValue(url) }
             $0.adbClient.shell = { _ in "Success" }
             $0.adbClient.listPackages = { _ in [] }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
             $0.uuid = .constant(installID)
         }
 
@@ -419,9 +469,11 @@ struct AppsFeatureTests {
             $0.activeInstallID = installID
             $0.activeInstallRemotePath = remotePath
         }
+        await store.receive(\.delegate)
         await store.receive(\.installProgressChanged) {
             $0.installProgress = "Installing APK..."
         }
+        await store.receive(\.delegate)
         await store.receive(\.installSucceeded) {
             $0.isInstalling = false
             $0.installProgress = ""
@@ -429,15 +481,33 @@ struct AppsFeatureTests {
             $0.activeInstallRemotePath = nil
             $0.statusMessage = "Success"
         }
+        await store.receive(\.delegate)
         await store.receive(\.loadApps) {
             $0.isLoading = true
+            $0.listGeneration = 1
+            $0.activeListGeneration = 1
             $0.errorMessage = nil
         }
-        await store.receive(\.appsLoaded.success) {
+        await store.receive(\.appsLoaded) {
             $0.isLoading = false
+            $0.activeListGeneration = nil
+            $0.listSnapshot = AppsFeature.ListSnapshotMetadata(
+                deviceID: DeviceIdentity.unknownID,
+                fetchedAt: Date(timeIntervalSince1970: 1_000)
+            )
         }
 
         #expect(receivedURL.value == localURL)
+    }
+
+    private static func connectedTarget() -> RemoteDeviceTarget {
+        RemoteDeviceTarget(
+            deviceID: "serial:test-device",
+            deviceName: "Pixel Test",
+            transportGeneration: 1,
+            switchedAt: Date(timeIntervalSince1970: 1),
+            isConnected: true
+        )
     }
 
     @Test
@@ -455,6 +525,7 @@ struct AppsFeatureTests {
                 cleanupCommand.setValue(command)
                 return ""
             }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
             $0.uuid = .constant(installID)
         }
 
@@ -468,13 +539,15 @@ struct AppsFeatureTests {
             $0.activeInstallID = installID
             $0.activeInstallRemotePath = remotePath
         }
+        await store.receive(\.delegate)
         await store.send(.cancelInstall) {
             $0.isInstalling = false
             $0.installProgress = ""
             $0.activeInstallID = nil
             $0.activeInstallRemotePath = nil
         }
-        await store.finish()
+        await store.receive(\.installCleanupCompleted)
+        await store.receive(\.delegate)
 
         #expect(cleanupCommand.value == "rm -f '\(remotePath)'")
     }
@@ -495,6 +568,7 @@ struct AppsFeatureTests {
                 cleanupCommand.setValue(command)
                 return ""
             }
+            $0.date.now = Date(timeIntervalSince1970: 1_000)
             $0.uuid = .constant(installID)
         }
 
@@ -508,9 +582,11 @@ struct AppsFeatureTests {
             $0.activeInstallID = installID
             $0.activeInstallRemotePath = remotePath
         }
+        await store.receive(\.delegate)
         await store.receive(\.installProgressChanged) {
             $0.installProgress = "Installing APK..."
         }
+        await store.receive(\.delegate)
         await store.receive(\.installFailed) {
             $0.isInstalling = false
             $0.installProgress = ""
@@ -518,6 +594,7 @@ struct AppsFeatureTests {
             $0.activeInstallRemotePath = nil
             $0.errorMessage = ADBError.commandFailed("INSTALL_FAILED_INVALID_APK").localizedDescription
         }
+        await store.receive(\.delegate)
 
         #expect(store.state.isInstalling == false)
         #expect(store.state.errorMessage?.contains("INSTALL_FAILED_INVALID_APK") == true)
@@ -541,5 +618,253 @@ struct AppsFeatureTests {
         #expect(store.state.activeInstallID == currentID)
         #expect(store.state.isInstalling)
         #expect(store.state.statusMessage == nil)
+    }
+
+    @Test
+    func staleListAndDestructiveConfirmationAreRejected() async {
+        let app = AppInfo(packageName: "com.test.app", isSystemApp: false)
+        var currentTarget = Self.connectedTarget()
+        let staleConfirmation = currentTarget.confirmation(for: app.packageName)
+        currentTarget.transportGeneration = 2
+        let store = TestStore(initialState: AppsFeature.State(
+            remoteTarget: currentTarget,
+            apps: [app],
+            isLoading: true,
+            listGeneration: 2,
+            activeListGeneration: 2
+        )) {
+            AppsFeature()
+        }
+
+        await store.send(.appsLoaded(
+            generation: 1,
+            deviceID: currentTarget.deviceID,
+            fetchedAt: Date(timeIntervalSince1970: 1_000),
+            .success([AppInfo(packageName: "stale.package", isSystemApp: false)])
+        ))
+        #expect(store.state.apps == [app])
+
+        await store.send(.uninstall(
+            app,
+            keepData: false,
+            confirmation: staleConfirmation
+        )) {
+            $0.errorMessage = "The target device changed. Confirm uninstall again on the connected device."
+        }
+        #expect(store.state.activeOperation == nil)
+    }
+
+    @Test
+    func listRefreshPreservesSelectedDetailAndRecordsSnapshotProvenance() async {
+        let target = Self.connectedTarget()
+        let selected = AppInfo(packageName: "com.example.selected", isSystemApp: false)
+        let refreshed = AppInfo(packageName: selected.packageName, isSystemApp: true)
+        let detail = AppDetail.parse(
+            packageName: selected.packageName,
+            rawText: "versionName=2.0"
+        )
+        let fetchedAt = Date(timeIntervalSince1970: 2_000)
+        let store = TestStore(initialState: AppsFeature.State(
+            remoteTarget: target,
+            apps: [selected],
+            isLoading: true,
+            listGeneration: 1,
+            activeListGeneration: 1,
+            selectedApp: selected,
+            appDetail: detail,
+            showingAppDetail: true,
+            appDetailText: detail.rawText
+        )) {
+            AppsFeature()
+        }
+
+        await store.send(.appsLoaded(
+            generation: 1,
+            deviceID: target.deviceID,
+            fetchedAt: fetchedAt,
+            .success([refreshed])
+        )) {
+            $0.isLoading = false
+            $0.activeListGeneration = nil
+            $0.apps = [refreshed]
+            $0.listSnapshot = AppsFeature.ListSnapshotMetadata(
+                deviceID: target.deviceID,
+                fetchedAt: fetchedAt
+            )
+            $0.selectedApp = refreshed
+        }
+
+        #expect(store.state.appDetail == detail)
+        #expect(store.state.showingAppDetail)
+    }
+
+    @Test
+    func detailResponseFromAnotherDeviceIsRejected() async {
+        let target = Self.connectedTarget()
+        let app = AppInfo(packageName: "com.example.selected")
+        let requestID = UUID(uuidString: "00000000-0000-0000-0000-000000000075")!
+        let store = TestStore(initialState: AppsFeature.State(
+            remoteTarget: target,
+            selectedApp: app,
+            isLoadingDetail: true,
+            activeAppDetailID: requestID,
+            activeAppDetailPackageName: app.packageName,
+            activeAppDetailDeviceID: target.deviceID
+        )) {
+            AppsFeature()
+        }
+
+        await store.send(.appDetailLoaded(
+            id: requestID,
+            packageName: app.packageName,
+            deviceID: "paired:another-device",
+            showsSheet: false,
+            .success("versionName=stale")
+        ))
+
+        #expect(store.state.isLoadingDetail)
+        #expect(store.state.appDetail == nil)
+    }
+
+    @Test
+    func operationsAreTrackedIndependentlyPerPackage() async {
+        let first = AppInfo(packageName: "com.example.first")
+        let second = AppInfo(packageName: "com.example.second")
+        let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000076")!
+        let store = TestStore(initialState: AppsFeature.State()) {
+            AppsFeature()
+        } withDependencies: {
+            $0.adbClient.forceStopApp = { _ in
+                try await Task.sleep(for: .seconds(60))
+            }
+            $0.uuid = .constant(operationID)
+        }
+
+        await store.send(.forceStop(first)) {
+            $0.operationsByPackage[first.packageName] = AppsFeature.ActiveOperation(
+                id: operationID,
+                packageName: first.packageName,
+                kind: .forceStop
+            )
+            $0.statusMessage = nil
+            $0.errorMessage = nil
+        }
+        await store.send(.forceStop(second)) {
+            $0.operationsByPackage[second.packageName] = AppsFeature.ActiveOperation(
+                id: operationID,
+                packageName: second.packageName,
+                kind: .forceStop
+            )
+            $0.statusMessage = nil
+            $0.errorMessage = nil
+        }
+
+        #expect(store.state.operationsByPackage.count == 2)
+        store.exhaustivity = .off
+        await store.send(.cancelAll)
+        await store.finish()
+    }
+
+    @Test
+    func systemAppsCannotEnterBulkUninstallSelection() async {
+        let user = AppInfo(packageName: "com.example.user", isSystemApp: false)
+        let system = AppInfo(packageName: "com.android.system", isSystemApp: true)
+        let store = TestStore(initialState: AppsFeature.State(apps: [user, system])) {
+            AppsFeature()
+        }
+
+        await store.send(.togglePackageSelection(system)) {
+            $0.errorMessage = "System apps are excluded from bulk uninstall."
+        }
+        #expect(store.state.selectedPackageNames.isEmpty)
+
+        await store.send(.selectAllVisible([user, system])) {
+            $0.isSelectionMode = true
+            $0.selectedPackageNames = [user.packageName]
+        }
+    }
+
+    @Test
+    func bulkUninstallTracksEachPackageAndRetainsFailures() async {
+        let first = AppInfo(packageName: "com.example.first", isSystemApp: false)
+        let second = AppInfo(packageName: "com.example.second", isSystemApp: false)
+        let target = Self.connectedTarget()
+        let operationID = UUID(uuidString: "00000000-0000-0000-0000-000000000077")!
+        let uninstalledPackages = LockIsolated<[String]>([])
+        let packages = [first.packageName, second.packageName]
+        let store = TestStore(initialState: AppsFeature.State(
+            remoteTarget: target,
+            apps: [first, second],
+            isSelectionMode: true,
+            selectedPackageNames: Set(packages)
+        )) {
+            AppsFeature()
+        } withDependencies: {
+            $0.adbClient.uninstallPackage = { packageName, _ in
+                uninstalledPackages.withValue { $0.append(packageName) }
+                if packageName == second.packageName { throw ADBError.commandFailed("Permission denied") }
+                return "Success"
+            }
+            $0.adbClient.listPackages = { _ in packages }
+            $0.uuid = .constant(operationID)
+            $0.date.now = Date(timeIntervalSince1970: 3_000)
+        }
+        store.exhaustivity = .off
+
+        await store.send(.uninstallSelected(
+            confirmation: target.confirmation(
+                for: AppsFeature.bulkUninstallObjectID(packages: packages),
+                at: Date(timeIntervalSince1970: 3_000)
+            )
+        ))
+        await store.receive(\.delegate)
+        await store.receive(\.bulkUninstallItemStarted)
+        await store.receive(\.bulkUninstallItemCompleted)
+        await store.receive(\.delegate)
+        await store.receive(\.bulkUninstallItemStarted)
+        await store.receive(\.bulkUninstallItemCompleted)
+        await store.receive(\.delegate)
+        await store.receive(\.bulkUninstallCompleted)
+        await store.receive(\.delegate)
+        await store.receive(\.loadApps)
+        await store.receive(\.appsLoaded)
+        store.exhaustivity = .on
+
+        #expect(uninstalledPackages.value == packages)
+        #expect(store.state.bulkResultSummary == "1 succeeded, 1 failed")
+        #expect(store.state.selectedPackageNames == [second.packageName])
+        #expect(store.state.bulkUninstall?.items.first(where: { $0.id == first.packageName })?.phase == .succeeded)
+        if case .failed = store.state.bulkUninstall?.items.first(where: { $0.id == second.packageName })?.phase {
+            // Expected per-package failure remains attached to the affected row.
+        } else {
+            Issue.record("Expected failed package state")
+        }
+    }
+
+    @Test
+    func targetSwitchInvalidatesAPKInstallReview() async {
+        let originalTarget = Self.connectedTarget()
+        var currentTarget = originalTarget
+        currentTarget.transportGeneration += 1
+        let reviewID = UUID(uuidString: "00000000-0000-0000-0000-000000000078")!
+        let review = AppsFeature.InstallReview(
+            id: reviewID,
+            localURL: URL(fileURLWithPath: "/tmp/demo.apk"),
+            fileName: "demo.apk",
+            totalBytes: 42,
+            target: originalTarget
+        )
+        let store = TestStore(initialState: AppsFeature.State(
+            remoteTarget: currentTarget,
+            installReview: review
+        )) {
+            AppsFeature()
+        }
+
+        await store.send(.confirmInstallReview) {
+            $0.installReview = nil
+            $0.errorMessage = "The target device changed. Review the APK again before installing."
+        }
+        #expect(store.state.isInstalling == false)
     }
 }

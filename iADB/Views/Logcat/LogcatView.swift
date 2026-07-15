@@ -5,20 +5,26 @@ import ComposableArchitecture
 struct LogcatView: View {
     @Bindable var store: StoreOf<LogcatFeature>
     let isEmbeddedInNavigationStack: Bool
+    let focusRequestID: Int
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     @State private var showingExportSheet = false
     @State private var exportText = ""
-    @State private var isShowingPresetEditor = false
+    @State private var isShowingFilters = false
+    @FocusState private var isSearchFocused: Bool
 
     init(
         store: StoreOf<LogcatFeature>,
-        isEmbeddedInNavigationStack: Bool = false
+        isEmbeddedInNavigationStack: Bool = false,
+        focusRequestID: Int = 0
     ) {
         self.store = store
         self.isEmbeddedInNavigationStack = isEmbeddedInNavigationStack
+        self.focusRequestID = focusRequestID
     }
 
     var body: some View {
@@ -38,11 +44,28 @@ struct LogcatView: View {
         .onAppear {
             store.send(.onAppear)
         }
+        .onChange(of: focusRequestID) { oldValue, newValue in
+            guard oldValue != newValue else { return }
+            isSearchFocused = true
+        }
         .sheet(isPresented: $showingExportSheet, onDismiss: {
             exportText = ""
             store.send(.clearExport)
         }) {
             ShareTextSheet(text: exportText, fileName: "logcat.txt")
+        }
+        .sheet(isPresented: filterSheetBinding) {
+            LogcatFilterView(store: store)
+                .iadbAdaptiveSheetHeight()
+        }
+        .sheet(isPresented: exportReviewBinding) {
+            LogcatExportReviewView(store: store)
+                .iadbAdaptiveSheetHeight()
+        }
+        .onChange(of: store.exportText) { _, value in
+            guard let value else { return }
+            exportText = value
+            showingExportSheet = true
         }
     }
 
@@ -53,7 +76,7 @@ struct LogcatView: View {
                     StatusBannerView(
                         style: .error,
                         message: error,
-                        actionTitle: "Retry",
+                        actionTitle: String(localized: "Retry"),
                         onDismiss: { store.send(.dismissError) },
                         onAction: { store.send(.startLogcat) }
                     )
@@ -61,15 +84,17 @@ struct LogcatView: View {
                     .padding(.top, 8)
                 }
 
-                controlsRegion(maxHeight: geometry.size.height * 0.62)
+                controlsRegion(maxHeight: geometry.size.height * 0.48)
 
                 Divider()
 
                 logContent
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .safeAreaInset(edge: .bottom) { followStatus }
             }
         }
         .background(Color(uiColor: .systemGroupedBackground))
+        .accessibilityIdentifier("workspace.logcat")
     }
 
     @ViewBuilder
@@ -90,16 +115,14 @@ struct LogcatView: View {
 
     private var controlsPanel: some View {
         VStack(spacing: 12) {
-            captureStatus
-            captureActions
+            WorkspaceToolbar {
+                captureStatus
+            } actions: {
+                captureActions
+            }
 
             filterControls
 
-            if !store.savedPresets.isEmpty {
-                savedPresets
-            }
-
-            presetEditor
         }
         .padding(.horizontal)
         .padding(.vertical, 10)
@@ -111,6 +134,7 @@ struct LogcatView: View {
             HStack(spacing: 6) {
                 captureToggleButton
                 pauseButton
+                exportButton
                 outputMenu
             }
             .fixedSize(horizontal: true, vertical: false)
@@ -118,6 +142,7 @@ struct LogcatView: View {
             VStack(alignment: .leading, spacing: 4) {
                 captureToggleButton
                 pauseButton
+                exportButton
                 outputMenu
             }
         }
@@ -155,8 +180,8 @@ struct LogcatView: View {
             Text(statusTitle)
                 .font(.subheadline.weight(.semibold))
 
-            if store.isPaused, !store.pauseBuffer.isEmpty {
-                Text("\(store.pauseBuffer.count) buffered")
+            if store.isPaused, store.newEntryCount > 0 {
+                Text("\(store.newEntryCount) new")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -164,7 +189,9 @@ struct LogcatView: View {
     }
 
     private var captureStatusCount: some View {
-        Text("\(store.filteredEntries.count) of \(store.entries.count)")
+        Text(store.droppedCount == 0
+            ? "\(store.filteredEntries.count) of \(store.entries.count)"
+            : "\(store.filteredEntries.count) of \(store.entries.count) · \(store.droppedCount) dropped")
             .font(.caption.monospacedDigit())
             .foregroundStyle(.secondary)
             .accessibilityLabel(
@@ -181,7 +208,7 @@ struct LogcatView: View {
             }
         } label: {
             Label(
-                store.isRunning ? "Stop" : "Start",
+                store.isRunning ? String(localized: "Stop") : String(localized: "Start"),
                 systemImage: store.isRunning ? "stop.fill" : "play.fill"
             )
             .font(.subheadline.weight(.semibold))
@@ -192,7 +219,10 @@ struct LogcatView: View {
         .tint(store.isRunning ? .red : .accentColor)
         .frame(minHeight: 44)
         .contentShape(Rectangle())
-        .accessibilityLabel(store.isRunning ? "Stop log capture" : "Start log capture")
+        .accessibilityLabel(
+            store.isRunning ? String(localized: "Stop log capture") : String(localized: "Start log capture")
+        )
+        .accessibilityIdentifier("logcat.primary.capture")
     }
 
     private var pauseButton: some View {
@@ -200,7 +230,7 @@ struct LogcatView: View {
             store.send(.togglePause)
         } label: {
             Label(
-                store.isPaused ? "Resume" : "Pause",
+                store.isPaused ? String(localized: "Resume") : String(localized: "Pause"),
                 systemImage: store.isPaused ? "play.fill" : "pause.fill"
             )
             .font(.subheadline.weight(.medium))
@@ -211,24 +241,20 @@ struct LogcatView: View {
         .frame(minHeight: 44)
         .contentShape(Rectangle())
         .disabled(!store.isRunning)
-        .accessibilityLabel(store.isPaused ? "Resume log display" : "Pause log display")
+        .accessibilityLabel(
+            store.isPaused ? String(localized: "Resume log display") : String(localized: "Pause log display")
+        )
         .accessibilityHint("Capture continues while the display is paused")
     }
 
     private var outputMenu: some View {
         Menu {
-            Button("Export Logs", systemImage: "square.and.arrow.up") {
-                exportText = LogcatFeature.exportString(store.filteredEntries)
-                showingExportSheet = true
-            }
-            .disabled(store.filteredEntries.isEmpty)
-
             Button("Clear Logs", systemImage: "trash", role: .destructive) {
                 store.send(.clearLog)
             }
-            .disabled(store.entries.isEmpty && store.pauseBuffer.isEmpty)
+            .disabled(store.entries.isEmpty)
         } label: {
-            Label("More", systemImage: "ellipsis.circle")
+            Image(systemName: "ellipsis.circle")
                 .font(.subheadline.weight(.medium))
                 .lineLimit(1)
         }
@@ -237,19 +263,37 @@ struct LogcatView: View {
         .frame(minHeight: 44)
         .contentShape(Rectangle())
         .accessibilityLabel("Log actions")
-        .accessibilityHint("Contains export and clear commands")
+        .accessibilityHint("Contains the clear command")
+    }
+
+    private var exportButton: some View {
+        Menu {
+            Button(LogcatExportScope.filtered.localizedTitle) { store.send(.prepareExport(.filtered)) }
+                .disabled(store.filteredEntries.isEmpty)
+            Button(LogcatExportScope.retained.localizedTitle) { store.send(.prepareExport(.retained)) }
+                .disabled(store.entries.isEmpty)
+            Button(LogcatExportScope.fromSelection.localizedTitle) { store.send(.prepareExport(.fromSelection)) }
+                .disabled(store.selectedEntryID == nil)
+        } label: {
+            Label("Export", systemImage: "square.and.arrow.up")
+                .font(.subheadline.weight(.medium))
+                .lineLimit(1)
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .accessibilityLabel("Review log export")
     }
 
     private var filterControls: some View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 searchField
-                levelMenu
+                filterButton
             }
 
             VStack(spacing: 8) {
                 searchField
-                levelMenu
+                filterButton
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -262,10 +306,12 @@ struct LogcatView: View {
                 .accessibilityHidden(true)
 
             TextField("Filter by tag or message", text: $store.filterText)
+                .focused($isSearchFocused)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .submitLabel(.done)
                 .accessibilityLabel("Filter logs")
+                .accessibilityIdentifier("logcat.search")
 
             if !store.filterText.isEmpty {
                 Button {
@@ -292,7 +338,11 @@ struct LogcatView: View {
     }
 
     private var levelMenu: some View {
-        Menu {
+        FilterSummaryButton(
+            "Level",
+            summary: selectedLevelTitle,
+            activeCount: store.selectedLevel == nil ? 0 : 1
+        ) {
             Button("All Levels") {
                 store.send(.binding(.set(\.selectedLevel, nil)))
             }
@@ -312,133 +362,58 @@ struct LogcatView: View {
                     store.send(.binding(.set(\.selectedLevel, level)))
                 }
             }
-        } label: {
-            Label(selectedLevelTitle, systemImage: "line.3.horizontal.decrease")
-                .font(.subheadline.weight(.medium))
-                .lineLimit(1)
-                .padding(.horizontal, 12)
-                .frame(minHeight: 44)
-                .background(
-                    Color(uiColor: .tertiarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: IADBDesign.controlRadius)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: IADBDesign.controlRadius)
-                        .stroke(Color.primary.opacity(0.07))
-                }
         }
         .accessibilityLabel("Log level, \(selectedLevelTitle)")
+        .accessibilityIdentifier("logcat.filter")
     }
 
-    private var savedPresets: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Text("Saved filters")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-
-                Spacer(minLength: 0)
-
-                Menu {
-                    ForEach(store.savedPresets) { preset in
-                        Button(role: .destructive) {
-                            store.send(.deletePreset(preset.id))
-                        } label: {
-                            Label("Delete \(preset.name)", systemImage: "trash")
-                        }
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
-                }
-                .frame(minWidth: 44, minHeight: 44)
-                .accessibilityLabel("Manage saved filters")
-            }
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 8) {
-                    ForEach(store.savedPresets) { preset in
-                        Button {
-                            store.send(.applyPreset(preset))
-                        } label: {
-                            Label(preset.name, systemImage: "line.3.horizontal.decrease.circle")
-                                .font(.caption.weight(.medium))
-                                .lineLimit(1)
-                                .padding(.horizontal, 11)
-                                .frame(minHeight: 34)
-                                .background(Color.accentColor.opacity(0.12), in: Capsule())
-                                .overlay {
-                                    Capsule()
-                                        .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
-                                }
-                        }
-                        .buttonStyle(.plain)
-                        .frame(minHeight: 44)
-                        .accessibilityLabel("Apply saved filter, \(preset.name)")
-                        .contextMenu {
-                            Button(role: .destructive) {
-                                store.send(.deletePreset(preset.id))
-                            } label: {
-                                Label("Delete Preset", systemImage: "trash")
-                            }
-                        }
-                    }
-                }
-            }
-            .frame(height: 44)
-        }
-    }
-
-    private var presetEditor: some View {
-        DisclosureGroup(isExpanded: $isShowingPresetEditor) {
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) {
-                    presetNameField
-                    savePresetButton
-                }
-
-                VStack(spacing: 8) {
-                    presetNameField
-                    savePresetButton
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-            .padding(.top, 10)
+    private var filterButton: some View {
+        Button {
+            isShowingFilters = true
         } label: {
-            Label("Save current filter", systemImage: "bookmark")
-                .font(.subheadline.weight(.medium))
-        }
-        .accessibilityHint("Saves the current text and level filters for reuse")
-    }
-
-    private var presetNameField: some View {
-        TextField("Preset name", text: $store.presetNameInput)
-            .textFieldStyle(.roundedBorder)
-            .submitLabel(.done)
-            .accessibilityLabel("Preset name")
-    }
-
-    private var savePresetButton: some View {
-        Button("Save Preset") {
-            store.send(.savePreset)
-            isShowingPresetEditor = false
+            Label(filterSummary, systemImage: "line.3.horizontal.decrease.circle")
+                .frame(minHeight: 44)
         }
         .buttonStyle(.bordered)
-        .frame(minHeight: 44)
-        .disabled(store.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        .accessibilityLabel("Filter logs, \(filterSummary)")
+        .accessibilityIdentifier("logcat.filter")
+    }
+
+    private var filterSummary: String {
+        var count = store.filter.levels.count
+        if !store.filter.query.isEmpty { count += 1 }
+        if !store.filter.includedTags.isEmpty { count += 1 }
+        if !store.filter.excludedTerms.isEmpty { count += 1 }
+        if store.filter.pid != nil { count += 1 }
+        if let presetID = store.appliedPresetID,
+           let preset = store.savedPresets.first(where: { $0.id == presetID }),
+           !store.hasUnsavedFilter {
+            return preset.name
+        }
+        return count == 0 ? String(localized: "Filter") : String(localized: "\(count) filters")
     }
 
     @ViewBuilder
     private var logContent: some View {
-        if store.filteredEntries.isEmpty {
+        if horizontalSizeClass == .regular && !dynamicTypeSize.isAccessibilitySize {
+            LogcatTableView(store: store)
+        } else if store.filteredEntries.isEmpty {
             emptyLogState
         } else {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(store.filteredEntries) { entry in
-                            LogEntryRow(entry: entry)
+                            LogEntryRow(
+                                entry: entry,
+                                isSelected: store.selectedEntryID == entry.id,
+                                isBookmarked: store.bookmarkedEntryIDs.contains(entry.id),
+                                onSelect: {
+                                    isSearchFocused = false
+                                    store.send(.selectEntry(store.selectedEntryID == entry.id ? nil : entry.id))
+                                },
+                                onBookmark: { store.send(.toggleBookmark(entry.id)) }
+                            )
                                 .id(entry.id)
                             Divider()
                                 .padding(.leading, 46)
@@ -447,8 +422,13 @@ struct LogcatView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                 }
+                .accessibilityIdentifier("logcat.list")
+                .scrollDismissesKeyboard(.interactively)
+                .simultaneousGesture(DragGesture(minimumDistance: 8).onEnded { _ in
+                    if !store.isPaused { store.send(.togglePause) }
+                })
                 .onChange(of: store.filteredEntries.count) { _, _ in
-                    if store.autoScroll, let last = store.filteredEntries.last {
+                    if store.autoScroll, !voiceOverEnabled, let last = store.filteredEntries.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
@@ -462,9 +442,9 @@ struct LogcatView: View {
             ConsoleEmptyState(
                 icon: "pause.circle",
                 title: "Display Paused",
-                message: store.pauseBuffer.isEmpty
-                    ? "New log entries will be buffered until you resume."
-                    : "\(store.pauseBuffer.count) entries are buffered and ready to display.",
+                message: store.newEntryCount == 0
+                    ? String(localized: "Capture continues while viewport follow is paused.")
+                    : String(localized: "\(store.newEntryCount) new entries are retained. Resume to follow the latest row."),
                 actionTitle: "Resume",
                 action: { store.send(.togglePause) }
             )
@@ -472,7 +452,7 @@ struct LogcatView: View {
             ConsoleEmptyState(
                 icon: "line.3.horizontal.decrease.circle",
                 title: "No Matching Logs",
-                message: "Try a different search term or include more log levels.",
+                message: String(localized: "Try a different search term or include more log levels."),
                 actionTitle: "Clear Filters",
                 action: clearFilters
             )
@@ -495,7 +475,7 @@ struct LogcatView: View {
             ConsoleEmptyState(
                 icon: "line.3.horizontal.decrease.circle",
                 title: "No Matching Logs",
-                message: "Clear the current filters or start a new capture.",
+                message: String(localized: "Clear the current filters or start a new capture."),
                 actionTitle: "Clear Filters",
                 action: clearFilters
             )
@@ -503,7 +483,7 @@ struct LogcatView: View {
             ConsoleEmptyState(
                 icon: "text.alignleft",
                 title: "No Logs Yet",
-                message: "Start capture to stream Android logcat output in real time.",
+                message: String(localized: "Start capture to stream Android logcat output in real time."),
                 actionTitle: "Start Capture",
                 action: { store.send(.startLogcat) }
             )
@@ -511,55 +491,106 @@ struct LogcatView: View {
     }
 
     private var statusTitle: String {
-        if store.isPaused { return "Display paused" }
-        if store.isRunning { return "Capture live" }
-        return "Capture stopped"
+        switch store.captureState {
+        case .starting: return String(localized: "Capture starting")
+        case .live: return String(localized: "Capture live")
+        case .stopped: return String(localized: "Capture stopped")
+        case .failed: return String(localized: "Capture failed")
+        }
     }
 
     private var statusIcon: String {
-        if store.isPaused { return "pause.circle.fill" }
-        if store.isRunning { return "record.circle.fill" }
-        return "stop.circle"
+        switch store.captureState {
+        case .starting: return "clock"
+        case .live: return "record.circle.fill"
+        case .stopped: return "stop.circle"
+        case .failed: return "exclamationmark.triangle"
+        }
     }
 
     private var statusColor: Color {
-        if store.isPaused { return .orange }
-        if store.isRunning { return .green }
-        return .secondary
+        switch store.captureState {
+        case .starting: return .orange
+        case .live: return .green
+        case .stopped: return .secondary
+        case .failed: return .red
+        }
     }
 
     private var statusAccessibilityLabel: String {
-        let count = "Showing \(store.filteredEntries.count) of \(store.entries.count) log entries."
-        if store.isPaused {
-            return "Log display paused. \(store.pauseBuffer.count) entries buffered. \(count)"
+        let count = String(localized: "Showing \(store.filteredEntries.count) of \(store.entries.count) log entries.")
+        let dropped = store.droppedCount == 0
+            ? ""
+            : String(localized: " \(store.droppedCount) older entries dropped.")
+        return String(localized: "\(statusTitle). \(count)\(dropped)")
+    }
+
+    private var followStatus: some View {
+        HStack {
+            Spacer()
+            Button {
+                if store.isPaused { store.send(.togglePause) }
+            } label: {
+                Label(
+                    store.isPaused
+                        ? (store.newEntryCount == 0
+                            ? String(localized: "Paused")
+                            : String(localized: "\(store.newEntryCount) new"))
+                        : String(localized: "Following"),
+                    systemImage: store.isPaused ? "pause.circle" : "arrow.down.to.line"
+                )
+                .font(.caption.weight(.semibold))
+                .frame(minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!store.isPaused)
+            .accessibilityHint(
+                store.isPaused
+                    ? String(localized: "Resumes viewport follow. Capture is still running.")
+                    : String(localized: "Viewport follows the latest retained log")
+            )
+            Spacer()
         }
-        return "\(statusTitle). \(count)"
+        .padding(.horizontal)
+        .background(.bar)
+    }
+
+    private var filterSheetBinding: Binding<Bool> {
+        Binding(get: { isShowingFilters }, set: { isShowingFilters = $0 })
+    }
+
+    private var exportReviewBinding: Binding<Bool> {
+        Binding(
+            get: { store.exportReview != nil },
+            set: { if !$0 { store.send(.cancelExport) } }
+        )
     }
 
     private var selectedLevelTitle: String {
-        guard let level = store.selectedLevel else { return "All levels" }
+        guard let level = store.selectedLevel else { return String(localized: "All levels") }
         return levelName(level)
     }
 
     private var hasActiveFilters: Bool {
-        !store.filterText.isEmpty || store.selectedLevel != nil
+        !store.filter.query.isEmpty || !store.filter.levels.isEmpty ||
+            !store.filter.includedTags.isEmpty || !store.filter.excludedTerms.isEmpty ||
+            store.filter.pid != nil
     }
 
     private func clearFilters() {
-        store.send(.binding(.set(\.filterText, "")))
-        store.send(.binding(.set(\.selectedLevel, nil)))
+        store.send(.binding(.set(\.filter, .empty)))
     }
 
     private func levelName(_ level: LogEntry.LogLevel) -> String {
         switch level {
-        case .verbose: return "Verbose"
-        case .debug: return "Debug"
-        case .info: return "Info"
-        case .warning: return "Warning"
-        case .error: return "Error"
-        case .fatal: return "Fatal"
-        case .silent: return "Silent"
-        case .unknown: return "Unknown"
+        case .verbose: return String(localized: "Verbose")
+        case .debug: return String(localized: "Debug")
+        case .info: return String(localized: "Info")
+        case .warning: return String(localized: "Warning")
+        case .error: return String(localized: "Error")
+        case .fatal: return String(localized: "Fatal")
+        case .silent: return String(localized: "Silent")
+        case .unknown: return String(localized: "Unknown")
         }
     }
 
@@ -570,7 +601,7 @@ struct LogcatView: View {
                 Image(systemName: "arrow.down.to.line")
             }
             .accessibilityLabel("Auto-scroll logs")
-            .accessibilityValue(store.autoScroll ? "On" : "Off")
+            .accessibilityValue(store.autoScroll ? String(localized: "On") : String(localized: "Off"))
         }
     }
 }
@@ -581,6 +612,20 @@ private struct ConsoleEmptyState: View {
     let message: String
     let actionTitle: String
     let action: () -> Void
+
+    init(
+        icon: String,
+        title: LocalizedStringResource,
+        message: String,
+        actionTitle: LocalizedStringResource,
+        action: @escaping () -> Void
+    ) {
+        self.icon = icon
+        self.title = String(localized: title)
+        self.message = message
+        self.actionTitle = String(localized: actionTitle)
+        self.action = action
+    }
 
     var body: some View {
         ContentUnavailableView {
@@ -611,145 +656,67 @@ struct ShareTextSheet: UIViewControllerRepresentable {
 
 struct LogEntryRow: View {
     let entry: LogEntry
-    @State private var isExpanded = false
-    @State private var collapsedMessageHeight: CGFloat = 0
-    @State private var fullMessageHeight: CGFloat = 0
+    let isSelected: Bool
+    let isBookmarked: Bool
+    let onSelect: () -> Void
+    let onBookmark: () -> Void
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(entry.level.rawValue)
-                .font(.system(.caption, design: .monospaced, weight: .bold))
-                .foregroundStyle(levelColor)
-                .frame(width: 28, height: 28)
-                .background(levelColor.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-                .accessibilityLabel(levelAccessibilityLabel)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(entry.tag.isEmpty ? "Unparsed" : entry.tag)
-                        .font(.system(.caption, design: .monospaced, weight: .semibold))
-                        .foregroundStyle(entry.tag.isEmpty ? Color.secondary : Color.accentColor)
-                        .lineLimit(1)
-
-                    Spacer(minLength: 4)
-
-                    if !entry.timestamp.isEmpty {
-                        Text(entry.timestamp)
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                    }
-
-                    Menu {
-                        Button {
-                            copyEntry()
-                        } label: {
-                            Label("Copy Log Entry", systemImage: "doc.on.doc")
-                        }
-
-                        if canExpand {
-                            Button {
-                                isExpanded.toggle()
-                            } label: {
-                                Label(
-                                    isExpanded ? "Show Less" : "Show Full Message",
-                                    systemImage: isExpanded ? "chevron.up" : "chevron.down"
-                                )
-                            }
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .frame(width: 32, height: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .frame(minWidth: 44, minHeight: 44)
-                    .accessibilityLabel("Actions for log entry")
-                }
-
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(entry.message)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.primary)
-                    .lineLimit(shouldCollapseMessage ? 4 : nil)
+                    .font(.caption.monospaced())
+                    .lineLimit(isSelected ? nil : 3)
                     .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background {
-                        messageMeasurementText(lineLimit: 4)
-                            .background {
-                                GeometryReader { proxy in
-                                    Color.clear.preference(
-                                        key: CollapsedLogMessageHeightKey.self,
-                                        value: proxy.size.height
-                                    )
-                                }
-                            }
-                            .hidden()
-                            .accessibilityHidden(true)
-                    }
-                    .background {
-                        messageMeasurementText(lineLimit: nil)
-                            .background {
-                                GeometryReader { proxy in
-                                    Color.clear.preference(
-                                        key: FullLogMessageHeightKey.self,
-                                        value: proxy.size.height
-                                    )
-                                }
-                            }
-                            .hidden()
-                            .accessibilityHidden(true)
-                    }
-                    .onPreferenceChange(CollapsedLogMessageHeightKey.self) { height in
-                        collapsedMessageHeight = height
-                    }
-                    .onPreferenceChange(FullLogMessageHeightKey.self) { height in
-                        fullMessageHeight = height
-                    }
-
-                if canExpand {
-                    Button {
-                        isExpanded.toggle()
-                    } label: {
-                        Label(
-                            isExpanded ? "Show less" : "Show full message",
-                            systemImage: isExpanded ? "chevron.up" : "chevron.down"
-                        )
-                        .font(.caption.weight(.semibold))
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.tint)
-                    .frame(minHeight: 44, alignment: .leading)
-                    .accessibilityHint(
-                        isExpanded
-                            ? "Collapses this log message"
-                            : "Shows this entire log message"
-                    )
+                Spacer(minLength: 6)
+                if isBookmarked {
+                    Image(systemName: "bookmark.fill")
+                        .foregroundStyle(.tint)
+                        .accessibilityLabel("Bookmarked")
                 }
+            }
 
-                if !entry.pid.isEmpty {
-                    Text("PID \(entry.pid)  ·  TID \(entry.tid)")
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
+            HStack(spacing: 8) {
+                Text(entry.level.rawValue).foregroundStyle(levelColor).fontWeight(.bold)
+                Text(entry.tag.isEmpty ? String(localized: "Unparsed") : entry.tag).foregroundStyle(.secondary)
+                Spacer(minLength: 4)
+                Text(entry.timestamp.components(separatedBy: " ").last ?? entry.timestamp)
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption2.monospacedDigit())
+
+            if isSelected {
+                Text("\(entry.timestamp) · PID \(entry.pid) · TID \(entry.tid)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { selectedActions }
+                    VStack(alignment: .leading, spacing: 8) { selectedActions }
                 }
             }
         }
-        .padding(.horizontal, 4)
-        .padding(.vertical, 8)
-        .accessibilityElement(children: .contain)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 9)
+        .iadbSelectionHighlight(isSelected: isSelected)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibilityDescription)
-        .accessibilityAction(named: "Copy log entry") {
-            copyEntry()
+        .accessibilityIdentifier("logcat.entry")
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+        .accessibilityAction(.default, onSelect)
+        .accessibilityAction(named: "Copy message") {
+            UIPasteboard.general.string = entry.message
+            announceAccessibility("Log message copied")
         }
-        .contextMenu {
-            Button {
-                copyEntry()
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
-            }
-        }
+        .accessibilityAction(
+            named: isBookmarked ? String(localized: "Remove bookmark") : String(localized: "Bookmark"),
+            onBookmark
+        )
     }
 
     private var accessibilityDescription: String {
-        let tag = entry.tag.isEmpty ? "Unparsed" : entry.tag
+        let tag = entry.tag.isEmpty ? String(localized: "Unparsed") : entry.tag
         var parts = [levelAccessibilityLabel, tag, entry.message]
         if !entry.timestamp.isEmpty { parts.append(entry.timestamp) }
         if !entry.pid.isEmpty { parts.append("PID \(entry.pid)") }
@@ -757,40 +724,33 @@ struct LogEntryRow: View {
         return parts.joined(separator: ", ")
     }
 
-    private var canExpand: Bool {
-        hasMeasuredMessage && fullMessageHeight > collapsedMessageHeight + 0.5
-    }
-
-    private var hasMeasuredMessage: Bool {
-        collapsedMessageHeight > 0 && fullMessageHeight > 0
-    }
-
-    private var shouldCollapseMessage: Bool {
-        hasMeasuredMessage && canExpand && !isExpanded
-    }
-
-    private func messageMeasurementText(lineLimit: Int?) -> some View {
-        Text(entry.message)
-            .font(.system(.caption, design: .monospaced))
-            .lineLimit(lineLimit)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func copyEntry() {
-        UIPasteboard.general.string = "\(entry.level.rawValue)/\(entry.tag): \(entry.message)"
+    @ViewBuilder
+    private var selectedActions: some View {
+        Button("Copy Message", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = entry.message
+            announceAccessibility("Log message copied")
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        Button(
+            isBookmarked ? String(localized: "Unbookmark") : String(localized: "Bookmark"),
+            systemImage: "bookmark",
+            action: onBookmark
+        )
+            .buttonStyle(.bordered)
+            .frame(minHeight: 44)
     }
 
     private var levelAccessibilityLabel: String {
         switch entry.level {
-        case .verbose: return "Verbose"
-        case .debug: return "Debug"
-        case .info: return "Info"
-        case .warning: return "Warning"
-        case .error: return "Error"
-        case .fatal: return "Fatal"
-        case .silent: return "Silent"
-        case .unknown: return "Unknown level"
+        case .verbose: return String(localized: "Verbose")
+        case .debug: return String(localized: "Debug")
+        case .info: return String(localized: "Info")
+        case .warning: return String(localized: "Warning")
+        case .error: return String(localized: "Error")
+        case .fatal: return String(localized: "Fatal")
+        case .silent: return String(localized: "Silent")
+        case .unknown: return String(localized: "Unknown level")
         }
     }
 
@@ -806,18 +766,236 @@ struct LogEntryRow: View {
     }
 }
 
-private struct CollapsedLogMessageHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
+private struct LogcatTableView: View {
+    @Bindable var store: StoreOf<LogcatFeature>
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+    var body: some View {
+        Group {
+            if store.showsProcessColumn {
+                tableWithProcess
+            } else {
+                tableWithoutProcess
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .secondaryAction) {
+                Toggle("PID/TID column", isOn: $store.showsProcessColumn)
+            }
+        }
+    }
+
+    private var tableWithProcess: some View {
+        Table(store.filteredEntries, selection: selectedBinding) {
+            TableColumn("Time") { Text($0.timestamp).font(.caption.monospacedDigit()) }
+                .width(min: 118, ideal: 142)
+            TableColumn("Level") { Text($0.level.rawValue).font(.caption.monospaced().bold()) }
+                .width(48)
+            TableColumn("PID/TID") { Text("\($0.pid)/\($0.tid)").font(.caption.monospacedDigit()) }
+                .width(min: 78, ideal: 96)
+            TableColumn("Tag") { Text($0.tag).font(.caption.monospaced()).lineLimit(1) }
+                .width(min: 100, ideal: 150)
+            TableColumn("Message") { Text($0.message).font(.caption.monospaced()).lineLimit(2) }
+                .width(min: 220, ideal: 420)
+        }
+        .accessibilityIdentifier("logcat.table")
+    }
+
+    private var tableWithoutProcess: some View {
+        Table(store.filteredEntries, selection: selectedBinding) {
+            TableColumn("Time") { Text($0.timestamp).font(.caption.monospacedDigit()) }
+                .width(min: 118, ideal: 142)
+            TableColumn("Level") { Text($0.level.rawValue).font(.caption.monospaced().bold()) }
+                .width(48)
+            TableColumn("Tag") { Text($0.tag).font(.caption.monospaced()).lineLimit(1) }
+                .width(min: 120, ideal: 180)
+            TableColumn("Message") { Text($0.message).font(.caption.monospaced()).lineLimit(2) }
+                .width(min: 260, ideal: 480)
+        }
+        .accessibilityIdentifier("logcat.table")
+    }
+
+    private var selectedBinding: Binding<UUID?> {
+        Binding(
+            get: { store.selectedEntryID },
+            set: { store.send(.selectEntry($0)) }
+        )
     }
 }
 
-private struct FullLogMessageHeightKey: PreferenceKey {
-    static let defaultValue: CGFloat = 0
+struct LogcatInspectorView: View {
+    let store: StoreOf<LogcatFeature>
+    let entry: LogEntry
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(entry.message).font(.body.monospaced()).textSelection(.enabled)
+                VStack(spacing: 0) {
+                    TechnicalRow(label: "Timestamp", value: entry.timestamp, monospacedValue: true)
+                    Divider()
+                    TechnicalRow(label: "Level", value: entry.level.rawValue)
+                    Divider()
+                    TechnicalRow(label: "Tag", value: entry.tag, monospacedValue: true)
+                    Divider()
+                    TechnicalRow(label: "PID / TID", value: "\(entry.pid) / \(entry.tid)", monospacedValue: true)
+                }
+                Button("Copy Message", systemImage: "doc.on.doc") {
+                    UIPasteboard.general.string = entry.message
+                    announceAccessibility("Log message copied")
+                }
+                    .buttonStyle(.borderedProminent).frame(minHeight: 44)
+                Button(
+                    store.bookmarkedEntryIDs.contains(entry.id)
+                        ? String(localized: "Remove Bookmark")
+                        : String(localized: "Bookmark"),
+                    systemImage: "bookmark"
+                ) { store.send(.toggleBookmark(entry.id)) }
+                    .buttonStyle(.bordered).frame(minHeight: 44)
+            }
+            .padding()
+        }
+        .navigationTitle("Log Details")
+    }
+}
+
+private struct LogcatExportReviewView: View {
+    @Bindable var store: StoreOf<LogcatFeature>
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if let review = store.exportReview {
+                    Section("Scope") {
+                        LabeledContent("Range", value: review.scope.localizedTitle)
+                            .accessibilityIdentifier("logcat.export.scope")
+                        LabeledContent("Entries", value: "\(review.entries.count)")
+                    }
+                    Section("Privacy") {
+                        Toggle("Include device metadata", isOn: metadataBinding)
+                        Toggle("Redact endpoint and serial", isOn: redactionBinding)
+                    }
+                }
+            }
+            .navigationTitle("Export Logs")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { store.send(.cancelExport) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Export") { store.send(.confirmExport) }
+                        .disabled(store.exportReview?.entries.isEmpty != false)
+                }
+            }
+        }
+    }
+
+    private var metadataBinding: Binding<Bool> {
+        Binding(
+            get: { store.exportReview?.includeDeviceMetadata ?? true },
+            set: { store.send(.setExportOptions(includeDeviceMetadata: $0, redactSensitiveValues: store.exportReview?.redactSensitiveValues ?? true)) }
+        )
+    }
+
+    private var redactionBinding: Binding<Bool> {
+        Binding(
+            get: { store.exportReview?.redactSensitiveValues ?? true },
+            set: { store.send(.setExportOptions(includeDeviceMetadata: store.exportReview?.includeDeviceMetadata ?? true, redactSensitiveValues: $0)) }
+        )
+    }
+}
+
+private struct LogcatFilterView: View {
+    @Bindable var store: StoreOf<LogcatFeature>
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Levels") {
+                    ForEach(LogEntry.LogLevel.allCases.filter { $0 != .silent && $0 != .unknown }, id: \.self) { level in
+                        Toggle(levelName(level), isOn: levelBinding(level))
+                    }
+                }
+                Section("Scope") {
+                    TextField("Included tags, comma separated", text: tagsBinding)
+                    TextField("Excluded terms, comma separated", text: excludedBinding)
+                    TextField("PID", text: pidBinding).keyboardType(.numberPad)
+                }
+                Section("Presets") {
+                    ForEach(store.savedPresets) { preset in
+                        VStack(alignment: .leading, spacing: 8) {
+                            TextField("Preset name", text: presetNameBinding(preset))
+                            HStack {
+                                Button("Apply") { store.send(.applyPreset(preset)) }
+                                Button("Duplicate") { store.send(.duplicatePreset(preset.id)) }
+                                Button("Delete", role: .destructive) { store.send(.deletePreset(preset.id)) }
+                            }
+                            .buttonStyle(.borderless)
+                            if preset.isGlobal { Text("Global").font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                    TextField("New preset name", text: $store.presetNameInput)
+                    Toggle("Available on all devices", isOn: $store.newPresetIsGlobal)
+                    Button("Save Current Filter") { store.send(.savePreset) }
+                        .disabled(store.presetNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .navigationTitle("Filter Logs")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+    }
+
+    @Environment(\.dismiss) private var dismiss
+
+    private func levelBinding(_ level: LogEntry.LogLevel) -> Binding<Bool> {
+        Binding(
+            get: { store.filter.levels.contains(level) },
+            set: { enabled in
+                var levels = store.filter.levels
+                if enabled { levels.insert(level) } else { levels.remove(level) }
+                store.send(.binding(.set(\.filter.levels, levels)))
+            }
+        )
+    }
+
+    private var tagsBinding: Binding<String> {
+        Binding(
+            get: { store.filter.includedTags.sorted().joined(separator: ", ") },
+            set: { store.send(.binding(.set(\.filter.includedTags, Set(parseList($0))))) }
+        )
+    }
+
+    private var excludedBinding: Binding<String> {
+        Binding(
+            get: { store.filter.excludedTerms.joined(separator: ", ") },
+            set: { store.send(.binding(.set(\.filter.excludedTerms, parseList($0)))) }
+        )
+    }
+
+    private var pidBinding: Binding<String> {
+        Binding(
+            get: { store.filter.pid.map(String.init) ?? "" },
+            set: { store.send(.binding(.set(\.filter.pid, Int($0)))) }
+        )
+    }
+
+    private func presetNameBinding(_ preset: LogcatPreset) -> Binding<String> {
+        Binding(get: { preset.name }, set: { store.send(.renamePreset(preset.id, $0)) })
+    }
+
+    private func parseList(_ text: String) -> [String] {
+        text.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    private func levelName(_ level: LogEntry.LogLevel) -> String {
+        switch level {
+        case .verbose: String(localized: "Verbose")
+        case .debug: String(localized: "Debug")
+        case .info: String(localized: "Info")
+        case .warning: String(localized: "Warning")
+        case .error: String(localized: "Error")
+        case .fatal: String(localized: "Fatal")
+        case .silent: String(localized: "Silent")
+        case .unknown: String(localized: "Unknown")
+        }
     }
 }

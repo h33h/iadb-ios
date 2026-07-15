@@ -30,6 +30,9 @@ struct AppDetail: Equatable {
     var firstInstallTime: String?
     var lastUpdateTime: String?
     var installerPackage: String?
+    var sourcePath: String?
+    var dataPath: String?
+    var permissions: [String]
     var flags: [String]
     var rawText: String
 
@@ -42,6 +45,9 @@ struct AppDetail: Equatable {
             firstInstallTime: match("firstInstallTime=([^\\n]+)", in: rawText),
             lastUpdateTime: match("lastUpdateTime=([^\\n]+)", in: rawText),
             installerPackage: match("installerPackageName=([^\\s]+)", in: rawText),
+            sourcePath: match("(?:codePath|sourceDir)=([^\\n]+)", in: rawText),
+            dataPath: match("dataDir=([^\\n]+)", in: rawText),
+            permissions: permissions(in: rawText),
             flags: flags(in: rawText),
             rawText: rawText
         )
@@ -64,6 +70,20 @@ struct AppDetail: Equatable {
             .map(String.init)
             .filter { !$0.isEmpty }
     }
+
+    private static func permissions(in text: String) -> [String] {
+        guard let regex = try? NSRegularExpression(
+            pattern: "(?m)^\\s+([A-Za-z0-9._]+): granted=(true|false)"
+        ) else { return [] }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.matches(in: text, range: range).compactMap { result in
+            guard result.numberOfRanges > 2,
+                  let nameRange = Range(result.range(at: 1), in: text),
+                  let grantedRange = Range(result.range(at: 2), in: text) else { return nil }
+            let status = text[grantedRange] == "true" ? "granted" : "denied"
+            return "\(text[nameRange]) — \(status)"
+        }
+    }
 }
 
 /// Represents a logcat log entry
@@ -76,7 +96,7 @@ struct LogEntry: Identifiable, Equatable {
     let tag: String
     let message: String
 
-    enum LogLevel: String, Codable {
+    enum LogLevel: String, Codable, Hashable, CaseIterable {
         case verbose = "V"
         case debug = "D"
         case info = "I"
@@ -136,12 +156,61 @@ struct ShellHistoryEntry: Identifiable, Equatable, Codable {
     let output: String
     let timestamp: Date
     let isError: Bool
+    let originDeviceID: String
+    let stdout: String
+    let stderr: String
+    let exitCode: Int32?
+    let duration: TimeInterval?
+    let wasTruncated: Bool
+    let usedLegacyFallback: Bool
 
-    init(id: UUID = UUID(), command: String, output: String, timestamp: Date, isError: Bool) {
+    init(
+        id: UUID = UUID(),
+        command: String,
+        output: String,
+        timestamp: Date,
+        isError: Bool,
+        originDeviceID: String = DeviceIdentity.unknownID,
+        stdout: String? = nil,
+        stderr: String = "",
+        exitCode: Int32? = nil,
+        duration: TimeInterval? = nil,
+        wasTruncated: Bool = false,
+        usedLegacyFallback: Bool = false
+    ) {
         self.id = id
         self.command = command
         self.output = output
         self.timestamp = timestamp
         self.isError = isError
+        self.originDeviceID = originDeviceID
+        self.stdout = stdout ?? output
+        self.stderr = stderr
+        self.exitCode = exitCode
+        self.duration = duration
+        self.wasTruncated = wasTruncated
+        self.usedLegacyFallback = usedLegacyFallback
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, command, output, timestamp, isError, originDeviceID
+        case stdout, stderr, exitCode, duration, wasTruncated, usedLegacyFallback
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        command = try container.decode(String.self, forKey: .command)
+        output = try container.decode(String.self, forKey: .output)
+        timestamp = try container.decode(Date.self, forKey: .timestamp)
+        isError = try container.decode(Bool.self, forKey: .isError)
+        originDeviceID = try container.decodeIfPresent(String.self, forKey: .originDeviceID)
+            ?? DeviceIdentity.unknownID
+        stdout = try container.decodeIfPresent(String.self, forKey: .stdout) ?? output
+        stderr = try container.decodeIfPresent(String.self, forKey: .stderr) ?? ""
+        exitCode = try container.decodeIfPresent(Int32.self, forKey: .exitCode)
+        duration = try container.decodeIfPresent(TimeInterval.self, forKey: .duration)
+        wasTruncated = try container.decodeIfPresent(Bool.self, forKey: .wasTruncated) ?? false
+        usedLegacyFallback = try container.decodeIfPresent(Bool.self, forKey: .usedLegacyFallback) ?? false
     }
 }

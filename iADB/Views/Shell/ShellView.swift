@@ -5,18 +5,19 @@ import ComposableArchitecture
 struct ShellView: View {
     @Bindable var store: StoreOf<ShellFeature>
     let isEmbeddedInNavigationStack: Bool
-
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    let focusRequestID: Int
 
     @FocusState private var isInputFocused: Bool
     @State private var showingClearHistoryConfirmation = false
 
     init(
         store: StoreOf<ShellFeature>,
-        isEmbeddedInNavigationStack: Bool = false
+        isEmbeddedInNavigationStack: Bool = false,
+        focusRequestID: Int = 0
     ) {
         self.store = store
         self.isEmbeddedInNavigationStack = isEmbeddedInNavigationStack
+        self.focusRequestID = focusRequestID
     }
 
     var body: some View {
@@ -36,6 +37,19 @@ struct ShellView: View {
         .onAppear {
             store.send(.onAppear)
         }
+        .onChange(of: focusRequestID) { oldValue, newValue in
+            guard oldValue != newValue else { return }
+            isInputFocused = true
+        }
+        .onChange(of: store.isExecuting) { wasExecuting, isExecuting in
+            if let announcement = ShellFeature.accessibilityAnnouncement(
+                wasExecuting: wasExecuting,
+                isExecuting: isExecuting,
+                execution: store.activeExecution
+            ) {
+                UIAccessibility.post(notification: .announcement, argument: announcement)
+            }
+        }
         .confirmationDialog(
             "Clear Shell History?",
             isPresented: $showingClearHistoryConfirmation,
@@ -46,7 +60,22 @@ struct ShellView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently removes all saved command output.")
+            Text("This permanently removes command output saved for the current device.")
+        }
+        .confirmationDialog(
+            "Reuse Command on Current Device?",
+            isPresented: historyReuseConfirmationBinding,
+            titleVisibility: .visible
+        ) {
+            Button("Reuse on Current Device") {
+                store.send(.confirmHistoryReuse)
+                isInputFocused = true
+            }
+            Button("Cancel", role: .cancel) {
+                store.send(.cancelHistoryReuse)
+            }
+        } message: {
+            Text("This command was saved for another or an unknown device. Review it before running it on the current target.")
         }
     }
 
@@ -62,14 +91,16 @@ struct ShellView: View {
                 .padding(.top, 8)
             }
 
-            shellStatus
-
             if !store.pinnedCommands.isEmpty {
                 pinnedCommands
             }
 
+            if store.isExecuting, let execution = store.activeExecution {
+                ActiveCommandExecutionView(execution: execution)
+            }
+
             Group {
-                if store.history.isEmpty {
+                if store.visibleHistory.isEmpty {
                     emptyState
                 } else {
                     historyList
@@ -80,148 +111,55 @@ struct ShellView: View {
             commandComposer
         }
         .background(Color(uiColor: .systemGroupedBackground))
-    }
-
-    private var shellStatus: some View {
-        Group {
-            if dynamicTypeSize.isAccessibilitySize {
-                VStack(alignment: .leading, spacing: 6) {
-                    shellStatusIdentity
-                    shellHistoryCount
-                }
-            } else {
-                HStack(spacing: 10) {
-                    shellStatusIdentity
-                    Spacer(minLength: 8)
-                    shellHistoryCount
-                }
-            }
-        }
-        .padding(.horizontal)
-        .padding(.vertical, 10)
-        .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .overlay(alignment: .bottom) { Divider() }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(store.isExecuting ? "Shell is executing a command" : "Shell is ready")
-    }
-
-    private var shellStatusIdentity: some View {
-        HStack(spacing: 7) {
-            if store.isExecuting {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-            }
-
-            Text(store.isExecuting ? "Executing command" : "Ready")
-                .font(.subheadline.weight(.semibold))
-        }
-    }
-
-    @ViewBuilder
-    private var shellHistoryCount: some View {
-        if !store.history.isEmpty {
-            Label("\(store.history.count)", systemImage: "clock.arrow.circlepath")
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("\(store.history.count) commands in history")
-        }
+        .accessibilityIdentifier("workspace.shell")
     }
 
     private var pinnedCommands: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Pinned commands", systemImage: "pin.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-                .padding(.horizontal)
+        DisclosureGroup {
+            VStack(spacing: 0) {
+                ForEach(store.pinnedCommands, id: \.self) { command in
+                    HStack(spacing: 8) {
+                        Button {
+                            store.send(.executeQuickCommand(command))
+                        } label: {
+                            Text(command)
+                                .font(.caption.monospaced())
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(store.isExecuting)
+                        .accessibilityLabel("Run pinned command, \(command)")
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 8) {
-                    ForEach(store.pinnedCommands, id: \.self) { command in
-                        HStack(spacing: 0) {
-                            Button {
-                                store.send(.executeQuickCommand(command))
-                            } label: {
-                                Text(command)
-                                    .font(.system(.caption, design: .monospaced, weight: .medium))
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .frame(maxWidth: 260, alignment: .leading)
-                                    .padding(.leading, 12)
-                                    .padding(.trailing, 8)
-                                    .frame(minHeight: 44)
-                            }
-                            .buttonStyle(.plain)
-                            .disabled(store.isExecuting)
-                            .accessibilityLabel("Run pinned command, \(command)")
-                            .accessibilityAction(named: "Edit command") {
-                                editPinnedCommand(command)
-                            }
-                            .accessibilityAction(named: "Unpin command") {
-                                store.send(.togglePinnedCommand(command))
-                            }
-
-                            Menu {
-                                Button {
-                                    editPinnedCommand(command)
-                                } label: {
-                                    Label("Edit Command", systemImage: "square.and.pencil")
-                                }
-                                Button {
-                                    store.send(.togglePinnedCommand(command))
-                                } label: {
-                                    Label("Unpin", systemImage: "pin.slash")
-                                }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.caption.weight(.semibold))
-                                    .frame(width: 32, height: 32)
-                                    .contentShape(Rectangle())
-                            }
-                            .frame(minWidth: 44, minHeight: 44)
-                            .accessibilityLabel("Actions for pinned command, \(command)")
+                        Button {
+                            store.send(.togglePinnedCommand(command))
+                        } label: {
+                            Image(systemName: "pin.slash")
+                                .frame(width: 44, height: 44)
                         }
-                        .frame(minHeight: 44)
-                        .background(
-                            Color.accentColor.opacity(0.12),
-                            in: RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .stroke(Color.accentColor.opacity(0.22), lineWidth: 1)
-                        }
-                        .contextMenu {
-                            Button {
-                                editPinnedCommand(command)
-                            } label: {
-                                Label("Edit Command", systemImage: "square.and.pencil")
-                            }
-                            Button {
-                                store.send(.togglePinnedCommand(command))
-                            } label: {
-                                Label("Unpin", systemImage: "pin.slash")
-                            }
-                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Unpin command, \(command)")
                     }
+                    if command != store.pinnedCommands.last { Divider() }
                 }
-                .padding(.horizontal)
             }
+            .padding(.top, 6)
+        } label: {
+            Label("Pinned", systemImage: "pin.fill")
+                .font(.subheadline.weight(.semibold))
         }
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .accessibilityLabel("Pinned Commands")
+        .padding(.horizontal)
+        .padding(.vertical, 8)
         .background(Color(uiColor: .secondarySystemGroupedBackground))
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var emptyState: some View {
         ScrollView {
             VStack(spacing: 20) {
                 ContentUnavailableView {
-                    Label("ADB Shell", systemImage: "terminal")
+                    Label("Command Runner", systemImage: "terminal")
                 } description: {
-                    Text("Run a command below or start with a common device diagnostic.")
+                    Text("Each command runs in a new shell session. Run a command below or start with a device diagnostic.")
                 }
 
                 VStack(alignment: .leading, spacing: 10) {
@@ -256,18 +194,26 @@ struct ShellView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .defaultScrollAnchor(.top)
+        .accessibilityIdentifier("shell.history")
     }
 
     private var historyList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 10) {
-                ForEach(store.history) { entry in
+            LazyVStack(alignment: .leading, spacing: 0) {
+                ForEach(store.visibleHistory) { entry in
                     ShellEntryView(
                         entry: entry,
                         isPinned: store.pinnedCommands.contains(entry.command),
+                        isSelected: store.selectedHistoryID == entry.id,
+                        onSelect: {
+                            isInputFocused = false
+                            store.send(.selectHistory(store.selectedHistoryID == entry.id ? nil : entry.id))
+                        },
                         onReuse: {
-                            store.send(.useHistoryCommand(entry.command))
-                            isInputFocused = true
+                            store.send(.requestHistoryReuse(entry.id))
+                            if entry.originDeviceID == store.activeDeviceID {
+                                isInputFocused = true
+                            }
                         },
                         onTogglePin: {
                             store.send(.togglePinnedCommand(entry.command))
@@ -275,26 +221,24 @@ struct ShellView: View {
                     )
                 }
             }
-            .padding()
+            .padding(.horizontal)
         }
         .scrollDismissesKeyboard(.interactively)
+        .onTapGesture { isInputFocused = false }
         .defaultScrollAnchor(.top)
     }
 
     private var commandComposer: some View {
         HStack(spacing: 10) {
-            Text("$")
-                .font(.system(.body, design: .monospaced, weight: .bold))
-                .foregroundStyle(.green)
-                .accessibilityHidden(true)
-
-            TextField("Enter command...", text: $store.commandInput)
+            TextField("Enter a one-shot command", text: $store.commandInput, axis: .vertical)
                 .font(.system(.body, design: .monospaced))
+                .lineLimit(1...4)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .submitLabel(.send)
                 .focused($isInputFocused)
                 .accessibilityLabel("Shell command")
+                .accessibilityIdentifier("shell.command")
                 .onSubmit {
                     runCommand()
                 }
@@ -303,29 +247,28 @@ struct ShellView: View {
                 Button {
                     store.send(.cancelExecution)
                 } label: {
-                    Image(systemName: "stop.fill")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(.red, in: Circle())
+                    Label("Stop", systemImage: "stop.fill")
+                        .frame(minHeight: 44)
                 }
-                .frame(minWidth: 44, minHeight: 44)
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
                 .accessibilityLabel("Stop command")
+                .accessibilityIdentifier("shell.primary.stop")
                 .accessibilityHint("Cancels the command currently running")
+                .keyboardShortcut(".", modifiers: .command)
             } else {
                 Button {
                     runCommand()
                 } label: {
-                    Image(systemName: "arrow.up")
-                        .font(.body.weight(.bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 36, height: 36)
-                        .background(Color.accentColor, in: Circle())
+                    Label("Run", systemImage: "play.fill")
+                        .frame(minHeight: 44)
                 }
-                .frame(minWidth: 44, minHeight: 44)
+                .buttonStyle(.borderedProminent)
                 .disabled(trimmedCommandInput.isEmpty)
                 .accessibilityLabel("Run command")
+                .accessibilityIdentifier("shell.primary.run")
                 .accessibilityHint("Executes the entered command on the connected device")
+                .keyboardShortcut(.return, modifiers: .command)
             }
         }
         .padding(.leading, 14)
@@ -339,21 +282,23 @@ struct ShellView: View {
         store.commandInput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var historyReuseConfirmationBinding: Binding<Bool> {
+        Binding(
+            get: { store.pendingHistoryReuse != nil },
+            set: { if !$0 { store.send(.cancelHistoryReuse) } }
+        )
+    }
+
     private func runCommand() {
         guard !trimmedCommandInput.isEmpty, !store.isExecuting else { return }
         isInputFocused = false
         store.send(.executeCommand)
     }
 
-    private func editPinnedCommand(_ command: String) {
-        store.send(.useHistoryCommand(command))
-        isInputFocused = true
-    }
-
     @ToolbarContentBuilder
     private var shellToolbar: some ToolbarContent {
         ToolbarItem(placement: .topBarTrailing) {
-            if !store.history.isEmpty {
+            if !store.visibleHistory.isEmpty {
                 Menu {
                     Button("Clear Shell History", systemImage: "trash", role: .destructive) {
                         showingClearHistoryConfirmation = true
@@ -367,18 +312,73 @@ struct ShellView: View {
     }
 }
 
+private struct ActiveCommandExecutionView: View {
+    let execution: ShellFeature.CommandExecution
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text(execution.command)
+                    .font(.subheadline.monospaced().weight(.semibold))
+                    .textSelection(.enabled)
+                Spacer(minLength: 8)
+                Text("Running")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if execution.usedLegacyFallback {
+                Label(
+                    "Legacy shell: stderr separation and live output are unavailable.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            if !execution.stdout.isEmpty {
+                Text(execution.stdout)
+                    .font(.caption.monospaced())
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if !execution.stderr.isEmpty {
+                Text(execution.stderr)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if execution.wasTruncated {
+                Label("Output truncated at 128 KiB", systemImage: "scissors")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, 10)
+        .background(Color(uiColor: .secondarySystemGroupedBackground))
+        .overlay(alignment: .bottom) { Divider() }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Running shell command \(execution.command). Live output updates without moving focus.")
+    }
+}
+
 struct ShellEntryView: View {
     let entry: ShellHistoryEntry
     let isPinned: Bool
+    let isSelected: Bool
+    let onSelect: () -> Void
     let onReuse: () -> Void
     let onTogglePin: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline, spacing: 7) {
-                Image(systemName: entry.isError ? "exclamationmark.circle.fill" : "chevron.forward")
-                    .font(.caption.weight(.bold))
-                    .foregroundStyle(entry.isError ? .red : .green)
+        VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Image(systemName: entry.isError ? "xmark.circle" : "checkmark.circle")
+                    .foregroundStyle(entry.isError ? .red : .secondary)
                     .accessibilityHidden(true)
 
                 Text(entry.command)
@@ -398,100 +398,236 @@ struct ShellEntryView: View {
                 Text(entry.timestamp, style: .time)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-
-                Menu {
-                    Button(action: onReuse) {
-                        Label("Reuse Command", systemImage: "arrow.uturn.backward.circle")
-                    }
-                    Button(action: onTogglePin) {
-                        Label(
-                            isPinned ? "Unpin Command" : "Pin Command",
-                            systemImage: isPinned ? "pin.slash" : "pin"
-                        )
-                    }
-                    Button {
-                        UIPasteboard.general.string = entry.output
-                    } label: {
-                        Label("Copy Output", systemImage: "doc.on.doc")
-                    }
-                    Button {
-                        UIPasteboard.general.string = entry.command
-                    } label: {
-                        Label("Copy Command", systemImage: "terminal")
-                    }
-                } label: {
-                    Image(systemName: "ellipsis.circle")
-                        .frame(width: 32, height: 32)
-                        .contentShape(Rectangle())
                 }
-                .frame(minWidth: 44, minHeight: 44)
-                .accessibilityLabel("Actions for \(entry.command)")
-            }
 
-            if !entry.output.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    if entry.isError {
-                        Text("Command failed")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.red)
-                    }
+                executionMetadata
 
-                    Text(entry.output)
+                if !entry.stdout.isEmpty {
+                    Text(entry.stdout)
                         .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.primary)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(10)
-                .background(
-                    entry.isError
-                        ? Color.red.opacity(0.08)
-                        : Color(uiColor: .tertiarySystemGroupedBackground),
-                    in: RoundedRectangle(cornerRadius: IADBDesign.controlRadius, style: .continuous)
-                )
-            } else {
-                Text("Command completed without output")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+
+                if !entry.stderr.isEmpty {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("stderr")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.red)
+                        Text(entry.stderr)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+
+                if entry.stdout.isEmpty, entry.stderr.isEmpty {
+                    Text(
+                        entry.exitCode == nil
+                            ? String(localized: "Command interrupted")
+                            : String(localized: "Completed without output")
+                    )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onSelect)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(accessibilitySummary)
+            .accessibilityIdentifier("shell.history.entry")
+            .accessibilityAction(.default, onSelect)
+            .accessibilityAction(named: "Reuse command", onReuse)
+            .accessibilityAction(
+                named: isPinned ? String(localized: "Unpin command") : String(localized: "Pin command"),
+                onTogglePin
+            )
+            .accessibilityAction(named: "Copy output") {
+                UIPasteboard.general.string = entry.output
+                announceAccessibility("Command output copied")
+            }
+            .contextMenu { entryContextMenu }
+
+            if isSelected { selectedActions }
         }
-        .padding(12)
-        .background(
-            Color(uiColor: .secondarySystemGroupedBackground),
-            in: RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous)
-                .stroke(entry.isError ? Color.red.opacity(0.25) : Color.primary.opacity(0.06))
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(entry.isError ? "Failed shell command" : "Completed shell command")
-        .accessibilityAction(named: "Reuse command", onReuse)
-        .accessibilityAction(named: isPinned ? "Unpin command" : "Pin command", onTogglePin)
-        .accessibilityAction(named: "Copy output") {
-            UIPasteboard.general.string = entry.output
-        }
-        .contextMenu {
+        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .iadbSelectionHighlight(isSelected: isSelected)
+        .overlay(alignment: .bottom) { Divider() }
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var entryContextMenu: some View {
             Button(action: onReuse) {
                 Label("Reuse Command", systemImage: "arrow.uturn.backward.circle")
             }
             Button(action: onTogglePin) {
                 Label(
-                    isPinned ? "Unpin Command" : "Pin Command",
+                    isPinned ? String(localized: "Unpin Command") : String(localized: "Pin Command"),
                     systemImage: isPinned ? "pin.slash" : "pin"
                 )
             }
             Button {
                 UIPasteboard.general.string = entry.output
+                announceAccessibility("Command output copied")
             } label: {
                 Label("Copy Output", systemImage: "doc.on.doc")
             }
             Button {
                 UIPasteboard.general.string = entry.command
+                announceAccessibility("Command copied")
             } label: {
                 Label("Copy Command", systemImage: "terminal")
             }
+    }
+
+    private var executionMetadata: some View {
+        HStack(spacing: 10) {
+            Text(
+                entry.exitCode.map { String(localized: "Exit \($0)") }
+                    ?? String(localized: "Interrupted")
+            )
+            if let duration = entry.duration {
+                Text(duration.formatted(.number.precision(.fractionLength(2))) + " s")
+            }
+            if entry.wasTruncated { Label("Truncated", systemImage: "scissors") }
+            if entry.usedLegacyFallback { Label("Legacy", systemImage: "exclamationmark.triangle") }
+            if entry.originDeviceID == DeviceIdentity.unknownID {
+                Label("Unknown device", systemImage: "questionmark.circle")
+            }
         }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+    }
+
+    private var selectedActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { actionButtons }
+            VStack(alignment: .leading, spacing: 8) { actionButtons }
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button("Reuse", systemImage: "arrow.uturn.backward", action: onReuse)
+            .frame(minHeight: 44)
+            .buttonStyle(.bordered)
+        Button("Copy", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = entry.output
+            announceAccessibility("Command output copied")
+        }
+        .frame(minHeight: 44)
+        .buttonStyle(.bordered)
+        Button(
+            isPinned ? String(localized: "Unpin") : String(localized: "Pin"),
+            systemImage: isPinned ? "pin.slash" : "pin",
+            action: onTogglePin
+        )
+            .frame(minHeight: 44)
+            .buttonStyle(.bordered)
+    }
+
+    private var accessibilitySummary: String {
+        let exit = entry.exitCode.map { String(localized: "exit code \($0)") }
+            ?? String(localized: "interrupted")
+        let stdoutSummary = entry.stdout.isEmpty
+            ? String(localized: "no standard output")
+            : String(localized: "standard output available")
+        let stderrSummary = entry.stderr.isEmpty
+            ? String(localized: "no standard error")
+            : String(localized: "standard error available")
+        return String(localized: "Shell command \(entry.command), \(exit), \(stdoutSummary), \(stderrSummary)")
+    }
+}
+
+struct ShellHistoryInspectorView: View {
+    let store: StoreOf<ShellFeature>
+    let entry: ShellHistoryEntry
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(entry.command)
+                    .font(.headline.monospaced())
+                    .textSelection(.enabled)
+
+                VStack(spacing: 0) {
+                    TechnicalRow(
+                        label: "Exit code",
+                        value: entry.exitCode.map(String.init) ?? String(localized: "Interrupted")
+                    )
+                    Divider()
+                    TechnicalRow(
+                        label: "Duration",
+                        value: entry.duration.map {
+                            String(localized: "\($0.formatted(.number.precision(.fractionLength(2)))) s")
+                        } ?? String(localized: "Unavailable")
+                    )
+                    Divider()
+                    TechnicalRow(
+                        label: "Output",
+                        value: entry.wasTruncated ? String(localized: "Truncated") : String(localized: "Complete")
+                    )
+                    Divider()
+                    TechnicalRow(
+                        label: "Protocol",
+                        value: entry.usedLegacyFallback ? String(localized: "Legacy shell") : "Shell v2"
+                    )
+                }
+
+                if !entry.stdout.isEmpty {
+                    outputSection("stdout", text: entry.stdout, color: .primary)
+                }
+                if !entry.stderr.isEmpty {
+                    outputSection("stderr", text: entry.stderr, color: .red)
+                }
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { actionButtons }
+                    VStack(alignment: .leading, spacing: 8) { actionButtons }
+                }
+            }
+            .padding()
+        }
+        .navigationTitle("Command Output")
+    }
+
+    private func outputSection(_ title: String, text: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption.monospaced())
+                .foregroundStyle(color)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    @ViewBuilder
+    private var actionButtons: some View {
+        Button("Reuse", systemImage: "arrow.uturn.backward") {
+            store.send(.requestHistoryReuse(entry.id))
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(minHeight: 44)
+        Button("Copy", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = entry.output
+            announceAccessibility("Command output copied")
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        Button(
+            store.pinnedCommands.contains(entry.command)
+                ? String(localized: "Unpin")
+                : String(localized: "Pin"),
+            systemImage: store.pinnedCommands.contains(entry.command) ? "pin.slash" : "pin"
+        ) {
+            store.send(.togglePinnedCommand(entry.command))
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
     }
 }
 
@@ -531,8 +667,14 @@ struct QuickCommandChip: View {
             }
             .buttonStyle(.plain)
             .frame(minWidth: 44, minHeight: 44)
-            .accessibilityLabel(isPinned ? "Unpin quick command, \(command)" : "Pin quick command, \(command)")
-            .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+            .accessibilityLabel(
+                isPinned
+                    ? String(localized: "Unpin quick command, \(command)")
+                    : String(localized: "Pin quick command, \(command)")
+            )
+            .accessibilityValue(
+                isPinned ? String(localized: "Pinned") : String(localized: "Not pinned")
+            )
             .accessibilityAddTraits(isPinned ? .isSelected : [])
         }
         .fixedSize(horizontal: false, vertical: true)
@@ -547,7 +689,7 @@ struct QuickCommandChip: View {
         .contextMenu {
             Button(action: onTogglePin) {
                 Label(
-                    isPinned ? "Unpin Command" : "Pin Command",
+                    isPinned ? String(localized: "Unpin Command") : String(localized: "Pin Command"),
                     systemImage: isPinned ? "pin.slash" : "pin"
                 )
             }

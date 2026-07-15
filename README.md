@@ -14,10 +14,11 @@ Run Android Wireless Debugging workflows from an iPhone or iPad.
 
 ## Highlights
 
-- Five focused tabs: Device, Files, Apps, Console, and Screens
+- Five focused iPhone tabs and an iPad sidebar with tables and inspectors
 - Pairing-code flow, local discovery, manual endpoints, and quick reconnect
-- Native SwiftUI interface with Dynamic Type and VoiceOver support
-- Shell and Logcat share one Console without mixing their controls
+- Persistent Device Context and an Activity Center for remote operations
+- Native SwiftUI interface with Dynamic Type, VoiceOver, contrast, and motion support
+- Command Runner and Logcat share one Console without mixing their state
 - Release workflow for signed archives, App Store validation, and optional TestFlight upload
 
 ## Features
@@ -27,16 +28,16 @@ Run Android Wireless Debugging workflows from an iPhone or iPad.
 | Device | Discover, pair, connect, reconnect, inspect device details, and manage saved connections. |
 | Files | Browse paths, preview and download files, upload content, create folders or files, rename, move, duplicate, and delete. |
 | Apps | Search, filter, and sort packages; install APKs; launch, force stop, clear data, or uninstall apps. |
-| Console | Run and stop shell commands, reuse or pin history, filter Logcat, save filters, pause the live display, and export logs. |
-| Screens | Capture, inspect, zoom, share, copy, save, and delete Android screenshots. |
+| Console | Stream and stop one-shot commands, reuse or pin device-scoped history, filter Logcat, pause viewport follow without stopping capture, and export reviewed log scopes. |
+| Screens | Capture, inspect, compare, zoom, share, copy, save, and delete device-scoped Android screenshots. |
 
 ## Screenshots
 
 All repository captures use the deterministic, fictional App Store fixture.
 
-| Device | Files | Shell |
+| Device | Files | Command Runner |
 | --- | --- | --- |
-| <img src="app-store/screenshots/iphone-6.9/01-device.png" alt="Connected Android device dashboard" width="220" /> | <img src="app-store/screenshots/iphone-6.9/02-files.png" alt="Android file manager" width="220" /> | <img src="app-store/screenshots/iphone-6.9/03-shell.png" alt="ADB Shell history and pinned commands" width="220" /> |
+| <img src="app-store/screenshots/iphone-6.9/01-device.png" alt="Connected Android device dashboard" width="220" /> | <img src="app-store/screenshots/iphone-6.9/02-files.png" alt="Android file manager" width="220" /> | <img src="app-store/screenshots/iphone-6.9/03-shell.png" alt="One-shot command history and pinned commands" width="220" /> |
 
 | Apps | Logs | Screens |
 | --- | --- | --- |
@@ -68,6 +69,20 @@ scripts/generate-project.sh
 3. Open `iADB.xcodeproj` in Xcode.
 4. Build and run the `iADB` scheme.
 
+### Deterministic Demo Device
+
+To explore every workspace without Android hardware, add this launch argument
+to **Product › Scheme › Edit Scheme… › Run › Arguments**:
+
+```text
+--iadb-fixture=connected
+```
+
+The Debug build opens the fictional `Demo Android` device with populated Files,
+Apps, Command Runner, Logcat and Screens data. Add `--iadb-root=files` (or
+`device`, `apps`, `console`, `screens`) to start in a specific workspace. Use
+`--iadb-fixture=first-launch` to inspect the connection-first onboarding flow.
+
 ## Running Tests
 
 ```bash
@@ -96,7 +111,7 @@ Defaults:
 1. Enable Developer Options on the Android device.
 2. Enable `Wireless debugging`.
 3. Open `Pair device with pairing code` on Android.
-4. In `iADB`, choose the discovered device or use manual pairing.
+4. In `iADB`, tap `Connect a Device`, choose the discovered device or tap `Pair Device`.
 5. Enter the pairing code and connect.
 
 Both devices must be on the same Wi-Fi network.
@@ -130,13 +145,6 @@ Regenerate the App Store screenshots or run the offline release gate from the re
 scripts/capture-app-store-screenshots.sh
 scripts/validate-app-store-release.sh
 ```
-
-## Roadmap
-
-- Expand connection diagnostics and recovery hints
-- Improve file management workflows for larger transfers
-- Add more automated coverage around device-specific edge cases
-- Automate App Store Connect metadata delivery
 
 ## Project Layout
 

@@ -3,14 +3,12 @@ import ComposableArchitecture
 
 struct SettingsView: View {
     @Bindable var store: StoreOf<ConnectionFeature>
+    @Bindable var screenshotStore: StoreOf<ScreenshotFeature>
     var isEmbeddedInNavigationStack = false
 
-    @State private var showingOpenSourceLicenses = false
+    @State private var showingConnections = false
     @State private var showingPrivacyPolicy = false
-
-    private enum Route: Hashable {
-        case connectionGuide
-    }
+    @State private var showingClearScreenshotsConfirmation = false
 
     var body: some View {
         Group {
@@ -23,19 +21,39 @@ struct SettingsView: View {
     }
 
     private var content: some View {
-        List {
-            Section {
-                NavigationLink(value: Route.connectionGuide) {
+        Form {
+            Section("Connection") {
+                Button {
+                    showingConnections = true
+                } label: {
                     SettingsRow(
-                        title: "Connection Guide",
-                        subtitle: "Set up Wireless debugging step by step",
-                        symbol: "questionmark.circle",
-                        tint: .accentColor
+                        title: "Connections",
+                        subtitle: "Current, nearby, saved and manual devices",
+                        symbol: "network",
+                        tint: .blue
                     )
                 }
-                .accessibilityLabel("Connection Guide")
-                .accessibilityHint("Opens Wireless debugging setup instructions")
+                .foregroundStyle(.primary)
+                .accessibilityIdentifier("settings.connections")
+            }
 
+            Section("Storage") {
+                LabeledContent("Screenshot storage", value: screenshotStorageUsage)
+
+                Button(role: .destructive) {
+                    showingClearScreenshotsConfirmation = true
+                } label: {
+                    Text("Delete All Screenshots")
+                }
+                .disabled(screenshotStore.screenshots.isEmpty || screenshotStore.isClearing)
+                .accessibilityIdentifier("settings.deleteAllScreenshots")
+
+                Text("Captures remain available offline and include their origin device.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section {
                 if let supportURL = URL(string: "https://github.com/h33h/iadb-ios/issues") {
                     Link(destination: supportURL) {
                         SettingsRow(
@@ -48,11 +66,6 @@ struct SettingsView: View {
                     .accessibilityLabel("Support")
                     .accessibilityHint("Opens the iADB support page")
                 }
-            } header: {
-                Text("Help")
-            }
-
-            Section {
                 Button {
                     showingPrivacyPolicy = true
                 } label: {
@@ -66,44 +79,8 @@ struct SettingsView: View {
                 .foregroundStyle(.primary)
                 .accessibilityLabel("Privacy Policy")
                 .accessibilityHint("Opens the in-app privacy policy")
-
-                Button {
-                    showingOpenSourceLicenses = true
-                } label: {
-                    SettingsRow(
-                        title: "Open Source Licenses",
-                        subtitle: "Third-party software acknowledgements",
-                        symbol: "doc.text",
-                        tint: .indigo
-                    )
-                }
-                .foregroundStyle(.primary)
-                .accessibilityLabel("Open Source Licenses")
-                .accessibilityHint("Shows third-party software licenses")
             } header: {
-                Text("Legal")
-            }
-
-            Section {
-                Button(role: .destructive) {
-                    store.send(.requestResetADBIdentity)
-                } label: {
-                    SettingsRow(
-                        title: "Reset ADB Identity",
-                        subtitle: "Remove the ADB key and forget every device",
-                        symbol: "key.slash",
-                        tint: .red
-                    )
-                }
-                .accessibilityLabel("Reset ADB Identity")
-                .accessibilityHint("Removes the ADB key and forgets saved devices")
-            } header: {
-                Text("Security")
-            } footer: {
-                Text(
-                    "Reset only removes trust from this iPhone or iPad. To revoke it completely, "
-                        + "also remove iADB from Android's Wireless debugging paired devices."
-                )
+                Text("Privacy & Help")
             }
 
             #if DEBUG
@@ -133,44 +110,33 @@ struct SettingsView: View {
                 Text("A private, local-network ADB utility for iPhone and iPad.")
             }
         }
+        .contentMargins(.bottom, 16, for: .scrollContent)
         .scrollContentBackground(.hidden)
         .background(IADBScreenBackground())
         .navigationTitle("Settings")
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: Route.self) { route in
-            switch route {
-            case .connectionGuide:
-                ConnectionGuideView()
-            }
-        }
-        .alert(
-            "Reset ADB Identity?",
-            isPresented: Binding(
-                get: { store.isResetIdentityConfirmationPresented },
-                set: { isPresented in
-                    if !isPresented {
-                        store.send(.cancelResetADBIdentity)
-                    }
-                }
-            )
-        ) {
-            Button("Reset Identity", role: .destructive) {
-                store.send(.confirmResetADBIdentity)
-            }
-            Button("Cancel", role: .cancel) {
-                store.send(.cancelResetADBIdentity)
-            }
-        } message: {
-            Text(
-                "This removes the ADB key from Keychain, forgets every saved device, and disconnects. "
-                    + "You will need to pair again."
+        .fullScreenCover(isPresented: $showingConnections) {
+            ConnectionsFlowView(
+                store: store,
+                allowsDismissWhenConnected: true,
+                startsDiscoveryOnAppear: false
             )
         }
-        .sheet(isPresented: $showingOpenSourceLicenses) {
-            OpenSourceLicensesView()
-        }
+        .onAppear { screenshotStore.send(.onAppear) }
         .sheet(isPresented: $showingPrivacyPolicy) {
             PrivacyPolicyView()
+        }
+        .confirmationDialog(
+            "Delete \(screenshotStore.screenshots.count) local screenshots?",
+            isPresented: $showingClearScreenshotsConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete Local Screenshots", role: .destructive) {
+                screenshotStore.send(.clearAll)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the local gallery from this iPhone or iPad. It does not affect the Android device.")
         }
         #if DEBUG
         .sheet(
@@ -199,6 +165,14 @@ struct SettingsView: View {
         default: "—"
         }
     }
+
+    private var screenshotStorageUsage: String {
+        if screenshotStore.isLoadingPersistence { return String(localized: "Loading…") }
+        return ByteCountFormatter.string(
+            fromByteCount: Int64(screenshotStore.storageByteCount),
+            countStyle: .file
+        )
+    }
 }
 
 private struct SettingsRow: View {
@@ -206,6 +180,18 @@ private struct SettingsRow: View {
     let subtitle: String
     let symbol: String
     let tint: Color
+
+    init(
+        title: LocalizedStringResource,
+        subtitle: LocalizedStringResource,
+        symbol: String,
+        tint: Color
+    ) {
+        self.title = String(localized: title)
+        self.subtitle = String(localized: subtitle)
+        self.symbol = symbol
+        self.tint = tint
+    }
 
     var body: some View {
         HStack(spacing: IADBDesign.spacing) {
@@ -226,77 +212,6 @@ private struct SettingsRow: View {
         }
         .padding(.vertical, 3)
         .accessibilityElement(children: .combine)
-    }
-}
-
-private struct ConnectionGuideView: View {
-    private let steps: [(String, String, String)] = [
-        (
-            "gearshape.2",
-            "Enable developer options",
-            "On Android, open Settings › About phone and tap Build number seven times."
-        ),
-        (
-            "wifi",
-            "Turn on Wireless debugging",
-            "Open Developer options, enable Wireless debugging, and keep both devices on the same Wi-Fi."
-        ),
-        (
-            "number",
-            "Open a pairing code",
-            "Tap “Pair device with pairing code”. Keep this Android dialog open while entering its details in iADB."
-        ),
-        (
-            "link",
-            "Pair, then connect",
-            "The pairing port and normal Wireless debugging port are different. iADB will guide you if a second address is needed."
-        ),
-    ]
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: IADBDesign.sectionSpacing) {
-                IADBCard {
-                    IADBCallout(
-                        title: "Before You Start",
-                        message: "Wireless debugging requires Android 11 or later and a local Wi-Fi network.",
-                        symbol: "checkmark.shield"
-                    )
-                }
-
-                ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
-                    IADBCard {
-                        HStack(alignment: .top, spacing: 14) {
-                            ZStack {
-                                IADBIconTile(symbol: step.0)
-                                Text("\(index + 1)")
-                                    .font(.caption2.weight(.bold))
-                                    .foregroundStyle(.white)
-                                    .padding(4)
-                                    .background(Color.accentColor, in: Circle())
-                                    .offset(x: 17, y: -17)
-                            }
-                            VStack(alignment: .leading, spacing: 5) {
-                                Text(step.1)
-                                    .font(.headline)
-                                Text(step.2)
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityLabel("Step \(index + 1), \(step.1). \(step.2)")
-                    }
-                }
-            }
-            .padding(IADBDesign.contentPadding)
-            .padding(.bottom, 24)
-            .iadbContentWidth()
-        }
-        .background(IADBScreenBackground())
-        .navigationTitle("Connection Guide")
-        .navigationBarTitleDisplayMode(.inline)
     }
 }
 

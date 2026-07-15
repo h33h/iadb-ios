@@ -2,6 +2,16 @@ import Foundation
 import XCTest
 @testable import iADB
 
+private actor TransferProgressRecorder {
+    private var values: [TransferProgress] = []
+
+    func append(_ progress: TransferProgress) {
+        values.append(progress)
+    }
+
+    func snapshot() -> [TransferProgress] { values }
+}
+
 final class ADBStreamTests: XCTestCase {
 
     func testStreamInitialization() {
@@ -199,7 +209,14 @@ final class ADBClientProtocolTests: XCTestCase {
             )
         )
 
-        try await client.pushData(Data(repeating: 0xAB, count: 65_537), to: "/sdcard/test.bin")
+        let localURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("iadb-progress-\(UUID().uuidString).bin")
+        try Data(repeating: 0xAB, count: 65_537).write(to: localURL)
+        defer { try? FileManager.default.removeItem(at: localURL) }
+        let reportedProgress = TransferProgressRecorder()
+        try await client.pushFile(from: localURL, to: "/sdcard/test.bin") { progress in
+            await reportedProgress.append(progress)
+        }
 
         let writes = transport.sentMessages.filter { $0.commandType == .write }
         XCTAssertEqual(writes.count, 4)
@@ -217,6 +234,11 @@ final class ADBClientProtocolTests: XCTestCase {
             "The service-level SYNC OKAY WRTE must receive a transport OKAY acknowledgement"
         )
         XCTAssertTrue(transport.sentMessages.contains { $0.commandType == .close })
+        let progressSnapshot = await reportedProgress.snapshot()
+        XCTAssertEqual(progressSnapshot, [
+            TransferProgress(completedUnits: 65_536, totalUnits: 65_537),
+            TransferProgress(completedUnits: 65_537, totalUnits: 65_537),
+        ])
     }
 
     func testPullParsesSyncFramesAcrossADBPacketBoundaries() async throws {
@@ -294,6 +316,48 @@ final class ADBClientProtocolTests: XCTestCase {
         XCTAssertTrue(transport.sentMessages.contains { $0.commandType == .close })
     }
 
+    func testShellV2StreamPreservesStdoutStderrAndExitOrder() async throws {
+        let transport = MockADBClientTransport()
+        let client = ADBClient(transport: transport)
+        let response = shellV2Packet(id: 1, payload: Data("out-1".utf8))
+            + shellV2Packet(id: 2, payload: Data("err-1".utf8))
+            + shellV2Packet(id: 1, payload: Data("out-2".utf8))
+            + shellV2Packet(id: 3, payload: Data([9]))
+
+        await transport.enqueue(.readyMessage(localId: 95, remoteId: 1))
+        await transport.enqueue(.writeMessage(localId: 95, remoteId: 1, data: response))
+
+        let stream = try await client.openShellCommand("mixed-output")
+        var events: [ShellEvent] = []
+        for try await event in stream { events.append(event) }
+
+        XCTAssertEqual(events, [
+            .stdout(Data("out-1".utf8)),
+            .stderr(Data("err-1".utf8)),
+            .stdout(Data("out-2".utf8)),
+            .exit(9),
+        ])
+    }
+
+    func testCancellingShellEventConsumerClosesLogicalStream() async throws {
+        let transport = MockADBClientTransport()
+        let client = ADBClient(transport: transport)
+        await transport.enqueue(.readyMessage(localId: 97, remoteId: 1))
+
+        let stream = try await client.openShellCommand("long-running")
+        let consumer = Task {
+            for try await _ in stream {}
+        }
+        await Task.yield()
+        consumer.cancel()
+        _ = try? await consumer.value
+
+        for _ in 0..<100 where !transport.sentMessages.contains(where: { $0.commandType == .close }) {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(transport.sentMessages.contains { $0.commandType == .close })
+    }
+
     func testShellV2ThrowsForNonZeroExitStatus() async throws {
         let transport = MockADBClientTransport()
         let client = ADBClient(transport: transport)
@@ -340,6 +404,42 @@ final class ADBClientProtocolTests: XCTestCase {
 
         let output = try await operation.value
         XCTAssertEqual(output, "legacy")
+    }
+
+    func testLegacyShellEventStreamMarksProtocolLimitations() async throws {
+        let transport = MockADBClientTransport()
+        let client = ADBClient(transport: transport)
+        await transport.enqueue(.closeMessage(localId: 0, remoteId: 1))
+
+        let operation = Task { () -> [ShellEvent] in
+            let stream = try await client.openShellCommand("echo legacy")
+            var events: [ShellEvent] = []
+            for try await event in stream { events.append(event) }
+            return events
+        }
+        try await waitForSentMessageCount(2, transport: transport)
+        let legacyOpen = try XCTUnwrap(
+            transport.sentMessages.last { $0.commandType == .open && $0.arg0 == 2 }
+        )
+        let destination = try XCTUnwrap(
+            String(data: Data(legacyOpen.data.dropLast()), encoding: .utf8)
+        )
+        let marker = try XCTUnwrap(extractLegacyMarker(from: destination))
+
+        await transport.enqueue(.readyMessage(localId: 98, remoteId: 2))
+        await transport.enqueue(.writeMessage(
+            localId: 98,
+            remoteId: 2,
+            data: Data("legacy output\n\(marker)4\n".utf8)
+        ))
+        await transport.enqueue(.closeMessage(localId: 98, remoteId: 2))
+
+        let events = try await operation.value
+        XCTAssertEqual(events, [
+            .legacyFallback,
+            .stdout(Data("legacy output".utf8)),
+            .exit(4),
+        ])
     }
 
     func testListDirectoryQuotesAndDereferencesSdcardSymlink() async throws {

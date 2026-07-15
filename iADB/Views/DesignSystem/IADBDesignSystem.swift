@@ -1,17 +1,70 @@
 import SwiftUI
 
+private struct IADBIncreasedContrastPreviewKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var iadbIncreasedContrastPreview: Bool {
+        get { self[IADBIncreasedContrastPreviewKey.self] }
+        set { self[IADBIncreasedContrastPreviewKey.self] = newValue }
+    }
+}
+
 /// Shared visual language for iADB's precision-utility interface.
 ///
 /// The system deliberately uses semantic Apple colors and text styles so it
 /// adapts to Dark Mode, increased contrast, and Dynamic Type without a custom
 /// theme layer fighting the platform.
 enum IADBDesign {
+    static let spacing4: CGFloat = 4
+    static let spacing8: CGFloat = 8
+    static let spacing12: CGFloat = 12
+    static let spacing16: CGFloat = 16
+    static let spacing20: CGFloat = 20
+    static let spacing24: CGFloat = 24
+    static let spacing32: CGFloat = 32
     static let compactSpacing: CGFloat = 8
     static let spacing: CGFloat = 12
     static let sectionSpacing: CGFloat = 20
     static let contentPadding: CGFloat = 16
     static let cardRadius: CGFloat = 16
     static let controlRadius: CGFloat = 10
+    static let heroRadius: CGFloat = 22
+    static let minimumHitTarget: CGFloat = 44
+    static let selectionAnimationDuration: TimeInterval = 0.18
+}
+
+private struct IADBSelectionHighlightModifier: ViewModifier {
+    let isSelected: Bool
+    let cornerRadius: CGFloat
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorSchemeContrast) private var accessibilityContrast
+
+    func body(content: Content) -> some View {
+        content
+            .background {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.accentColor.opacity(isSelected ? selectedOpacity : 0))
+            }
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, IADBDesign.spacing8)
+                    .opacity(isSelected ? 1 : 0)
+                    .accessibilityHidden(true)
+            }
+            .animation(
+                reduceMotion ? nil : .easeInOut(duration: IADBDesign.selectionAnimationDuration),
+                value: isSelected
+            )
+    }
+
+    private var selectedOpacity: Double {
+        accessibilityContrast == .increased ? 0.2 : 0.11
+    }
 }
 
 struct IADBScreenBackground: View {
@@ -23,6 +76,8 @@ struct IADBScreenBackground: View {
 
 struct IADBCard<Content: View>: View {
     let content: Content
+    @Environment(\.colorSchemeContrast) private var accessibilityContrast
+    @Environment(\.iadbIncreasedContrastPreview) private var previewIncreasedContrast
 
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
@@ -36,8 +91,15 @@ struct IADBCard<Content: View>: View {
             .clipShape(RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+                    .stroke(
+                        Color.primary.opacity(usesIncreasedContrast ? 0.3 : 0.08),
+                        lineWidth: usesIncreasedContrast ? 1 : 0.5
+                    )
             }
+    }
+
+    private var usesIncreasedContrast: Bool {
+        accessibilityContrast == .increased || previewIncreasedContrast
     }
 }
 
@@ -47,11 +109,21 @@ struct IADBSectionHeader<Trailing: View>: View {
     let trailing: Trailing
 
     init(
-        _ title: String,
+        _ title: LocalizedStringResource,
+        subtitle: LocalizedStringResource? = nil,
+        @ViewBuilder trailing: () -> Trailing
+    ) {
+        self.title = String(localized: title)
+        self.subtitle = subtitle.map { String(localized: $0) }
+        self.trailing = trailing()
+    }
+
+    init(
+        localizedTitle: String,
         subtitle: String? = nil,
         @ViewBuilder trailing: () -> Trailing
     ) {
-        self.title = title
+        self.title = localizedTitle
         self.subtitle = subtitle
         self.trailing = trailing()
     }
@@ -75,8 +147,12 @@ struct IADBSectionHeader<Trailing: View>: View {
 }
 
 extension IADBSectionHeader where Trailing == EmptyView {
-    init(_ title: String, subtitle: String? = nil) {
+    init(_ title: LocalizedStringResource, subtitle: LocalizedStringResource? = nil) {
         self.init(title, subtitle: subtitle) { EmptyView() }
+    }
+
+    init(localizedTitle: String, subtitle: String? = nil) {
+        self.init(localizedTitle: localizedTitle, subtitle: subtitle) { EmptyView() }
     }
 }
 
@@ -119,11 +195,19 @@ struct IADBStatusBadge: View {
             Text(title)
                 .foregroundStyle(.primary)
         }
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(kind.color.opacity(0.12), in: Capsule())
-            .accessibilityElement(children: .combine)
+        .font(.caption.weight(.semibold))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(title), \(accessibilityStatus)")
+    }
+
+    private var accessibilityStatus: String {
+        switch kind {
+        case .neutral: String(localized: "Status")
+        case .progress: String(localized: "In progress")
+        case .success: String(localized: "Success")
+        case .warning: String(localized: "Warning")
+        case .error: String(localized: "Error")
+        }
     }
 }
 
@@ -141,12 +225,26 @@ struct IADBIconTile: View {
     }
 }
 
-struct IADBMetricCard: View {
+struct LabeledMetric: View {
     let title: String
     let value: String
     let symbol: String
     var tint: Color = .accentColor
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.colorSchemeContrast) private var accessibilityContrast
+    @Environment(\.iadbIncreasedContrastPreview) private var previewIncreasedContrast
+
+    init(
+        title: LocalizedStringResource,
+        value: String,
+        symbol: String,
+        tint: Color = .accentColor
+    ) {
+        self.title = String(localized: title)
+        self.value = value
+        self.symbol = symbol
+        self.tint = tint
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: IADBDesign.compactSpacing) {
@@ -157,7 +255,6 @@ struct IADBMetricCard: View {
                 .font(.headline)
                 .foregroundStyle(.primary)
                 .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : 2)
-                .minimumScaleFactor(dynamicTypeSize.isAccessibilitySize ? 1 : 0.8)
                 .fixedSize(horizontal: false, vertical: true)
             Text(title)
                 .font(.caption)
@@ -170,10 +267,19 @@ struct IADBMetricCard: View {
         .clipShape(RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: IADBDesign.cardRadius, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 0.5)
+                .stroke(
+                    Color.primary.opacity(usesIncreasedContrast ? 0.3 : 0.08),
+                    lineWidth: usesIncreasedContrast ? 1 : 0.5
+                )
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(title), \(value.isEmpty ? "not available" : value)")
+        .accessibilityLabel(
+            "\(title), \(value.isEmpty ? String(localized: "not available") : value)"
+        )
+    }
+
+    private var usesIncreasedContrast: Bool {
+        accessibilityContrast == .increased || previewIncreasedContrast
     }
 }
 
@@ -182,6 +288,18 @@ struct IADBCallout: View {
     let message: String
     let symbol: String
     var tint: Color = .accentColor
+
+    init(
+        title: LocalizedStringResource,
+        message: String,
+        symbol: String,
+        tint: Color = .accentColor
+    ) {
+        self.title = String(localized: title)
+        self.message = message
+        self.symbol = symbol
+        self.tint = tint
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: IADBDesign.spacing) {
@@ -200,8 +318,27 @@ struct IADBCallout: View {
 }
 
 extension View {
-    func iadbContentWidth() -> some View {
-        frame(maxWidth: 980, alignment: .center)
+    /// A consistent, non-overlapping selected state for list and table rows.
+    /// The leading marker keeps the state distinguishable without relying on
+    /// color alone, while Reduce Motion removes the transition automatically.
+    func iadbSelectionHighlight(
+        isSelected: Bool,
+        cornerRadius: CGFloat = IADBDesign.controlRadius
+    ) -> some View {
+        modifier(
+            IADBSelectionHighlightModifier(
+                isSelected: isSelected,
+                cornerRadius: cornerRadius
+            )
+        )
+    }
+
+    func iadbReadableWidth(maxWidth: CGFloat = 720) -> some View {
+        frame(maxWidth: maxWidth, alignment: .center)
             .frame(maxWidth: .infinity)
+    }
+
+    func iadbWorkspaceWidth() -> some View {
+        frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }

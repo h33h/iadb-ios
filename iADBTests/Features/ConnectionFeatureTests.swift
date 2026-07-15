@@ -556,6 +556,88 @@ struct ConnectionFeatureTests {
     }
 
     @Test
+    func discoveredPairingShowsConnectingPhaseUntilRegularEndpointConnects() async {
+        let discovered = DiscoveredDevice(
+            id: "adb-pixel",
+            name: "Pixel",
+            host: "192.168.1.42",
+            port: 38888,
+            isPaired: false,
+            pairingPort: 37123
+        )
+        let store = TestStore(
+            initialState: ConnectionFeature.State(
+                discoveredDevices: [discovered],
+                pairing: PairingFeature.State(
+                    hostInput: discovered.host,
+                    portInput: "37123",
+                    pairingCode: "123456",
+                    pairingState: .pairing,
+                    phase: .negotiating,
+                    serviceName: discovered.id
+                )
+            )
+        ) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.continuousClock = ContinuousClock()
+            $0.pairedDevicesClient.save = { _ in }
+            $0.adbClient.connect = { host, port in
+                #expect(host == discovered.host)
+                #expect(port == discovered.port)
+                return "device::Pixel"
+            }
+            $0.adbClient.connectionEvents = { AsyncStream { $0.finish() } }
+        }
+        store.exhaustivity = .off(showSkippedAssertions: false)
+
+        await store.send(
+            .pairing(.presented(.pairingCompleted(name: "Pixel", guid: "pixel-guid")))
+        )
+        #expect(store.state.pairing?.phase == .connecting)
+        #expect(store.state.connectionState == .disconnected)
+
+        await store.receive(\.connectToDevice, timeout: .seconds(2))
+        #expect(store.state.connectionState == .connecting)
+        #expect(store.state.pairing?.phase == .connecting)
+
+        await store.receive(\.connectionResult)
+        await store.receive(\.pairing.dismiss)
+        #expect(store.state.connectionState == .connected)
+        #expect(store.state.pairing == nil)
+    }
+
+    @Test
+    func dismissingPairingDuringRegularEndpointConnectionCancelsTransport() async {
+        let disconnected = LockIsolated(false)
+        let store = TestStore(
+            initialState: ConnectionFeature.State(
+                connectionState: .connecting,
+                connectionGeneration: 1,
+                activeConnectionGeneration: 1,
+                pairing: PairingFeature.State(
+                    pairingState: .success("Paired with Pixel"),
+                    phase: .connecting
+                )
+            )
+        ) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.adbClient.disconnect = { disconnected.setValue(true) }
+        }
+
+        await store.send(.pairing(.dismiss)) {
+            $0.pairing = nil
+        }
+        await store.receive(\.cancelConnection) {
+            $0.connectionState = .disconnected
+            $0.lastConnectionError = nil
+            $0.activeConnectionGeneration = nil
+        }
+        #expect(disconnected.value)
+    }
+
+    @Test
     func manualConnectionRejectsPairingPortPlaceholder() async {
         let paired = PairedDevice(name: "Pixel", publicKey: Data([1]), lastHost: "192.168.1.10")
         let store = TestStore(
@@ -575,6 +657,86 @@ struct ConnectionFeatureTests {
         await store.send(.connectManualEndpoint) {
             $0.manualConnection?.validationError = "Enter a valid Wireless debugging port (1–65535), not the pairing port."
         }
+    }
+
+    @Test
+    func renameSavedDeviceUpdatesEveryVisibleReferenceAndPersists() async {
+        let paired = PairedDevice(
+            name: "Pixel",
+            guid: "pixel-guid",
+            lastHost: "192.168.1.20",
+            serviceName: "adb-pixel"
+        )
+        let discovered = DiscoveredDevice(
+            id: "adb-pixel",
+            name: "Pixel",
+            host: "192.168.1.20",
+            port: 37777,
+            isPaired: true
+        )
+        let savedDevices = LockIsolated<[PairedDevice]>([])
+        let store = TestStore(
+            initialState: ConnectionFeature.State(
+                discoveredDevices: [discovered],
+                pairedDevices: [paired],
+                lastConnectionDevice: discovered,
+                manualConnection: ConnectionFeature.ManualConnection(
+                    pairedDeviceID: paired.id,
+                    deviceName: "Pixel",
+                    hostInput: "192.168.1.20"
+                )
+            )
+        ) {
+            ConnectionFeature()
+        } withDependencies: {
+            $0.pairedDevicesClient.save = { savedDevices.setValue($0) }
+        }
+
+        await store.send(.requestRenamePairedDevice(id: paired.id)) {
+            $0.savedDeviceRename = ConnectionFeature.SavedDeviceRename(
+                deviceID: paired.id,
+                nameInput: "Pixel"
+            )
+        }
+        await store.send(.savedDeviceRenameChanged("  Workshop Pixel  ")) {
+            $0.savedDeviceRename?.nameInput = "  Workshop Pixel  "
+        }
+        await store.send(.confirmRenamePairedDevice) {
+            $0.pairedDevices[0].name = "Workshop Pixel"
+            $0.discoveredDevices[0].name = "Workshop Pixel"
+            $0.lastConnectionDevice?.name = "Workshop Pixel"
+            $0.manualConnection?.deviceName = "Workshop Pixel"
+            $0.savedDeviceRename = nil
+        }
+
+        #expect(savedDevices.value.first?.name == "Workshop Pixel")
+        #expect(savedDevices.value.first?.id == paired.id)
+        #expect(savedDevices.value.first?.guid == paired.guid)
+    }
+
+    @Test
+    func renameSavedDeviceRejectsAnEmptyNameInline() async {
+        let paired = PairedDevice(
+            name: "Pixel",
+            guid: "pixel-guid",
+            lastHost: "192.168.1.20"
+        )
+        let store = TestStore(
+            initialState: ConnectionFeature.State(
+                pairedDevices: [paired],
+                savedDeviceRename: ConnectionFeature.SavedDeviceRename(
+                    deviceID: paired.id,
+                    nameInput: "   "
+                )
+            )
+        ) {
+            ConnectionFeature()
+        }
+
+        await store.send(.confirmRenamePairedDevice) {
+            $0.savedDeviceRename?.validationError = "Enter a name for this saved device."
+        }
+        #expect(store.state.pairedDevices == [paired])
     }
 
     @Test

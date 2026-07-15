@@ -5,12 +5,25 @@ import ComposableArchitecture
 struct DeviceInfoView: View {
     let store: StoreOf<DeviceInfoFeature>
     var isEmbeddedInNavigationStack = true
+    var lastUpdated: Date?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var showingRebootMenu = false
+    @State private var rebootConfirmations: [String: DestructiveActionConfirmation] = [:]
     @State private var showingExportSheet = false
     @State private var copiedSnapshot = false
+    @State private var rawPropertiesExpanded = false
+
+    init(
+        store: StoreOf<DeviceInfoFeature>,
+        isEmbeddedInNavigationStack: Bool = true,
+        lastUpdated: Date? = nil
+    ) {
+        self.store = store
+        self.isEmbeddedInNavigationStack = isEmbeddedInNavigationStack
+        self.lastUpdated = lastUpdated
+    }
 
     var body: some View {
         Group {
@@ -23,6 +36,125 @@ struct DeviceInfoView: View {
     }
 
     private var content: some View {
+        List {
+            if store.isLoading || store.isRebooting || store.rebootStatusMessage != nil || store.errorMessage != nil || copiedSnapshot {
+                Section {
+                    VStack(alignment: .leading, spacing: IADBDesign.spacing8) {
+                        statusArea
+                    }
+                }
+            }
+
+            Section("Device") {
+                LabeledContent("Model", value: store.details.displayTitle)
+                LabeledContent("Status") {
+                    IADBStatusBadge(
+                        title: store.remoteTarget.isConnected
+                            ? String(localized: "Connected")
+                            : String(localized: "Last known"),
+                        kind: store.remoteTarget.isConnected ? .success : .warning
+                    )
+                }
+            }
+
+            Section("Identity") {
+                TechnicalRow(label: "Manufacturer", value: store.details.manufacturer)
+                TechnicalRow(label: "Device Name", value: store.details.deviceName, allowsCopy: true)
+                TechnicalRow(label: "Serial Number", value: store.details.serialNumber, monospacedValue: true, allowsCopy: true)
+            }
+
+            Section("System") {
+                LabeledContent("Android Version", value: store.details.androidVersion.isEmpty ? "—" : store.details.androidVersion)
+                LabeledContent("SDK Level", value: store.details.sdkVersion.isEmpty ? "—" : store.details.sdkVersion)
+                TechnicalRow(label: "Build", value: store.details.buildFingerprint, monospacedValue: true, allowsCopy: true)
+            }
+
+            Section("Hardware") {
+                LabeledContent("Battery", value: batteryDisplay.isEmpty ? "—" : batteryDisplay)
+                LabeledContent("Screen", value: store.details.screenResolution.isEmpty ? "—" : store.details.screenResolution)
+                LabeledContent("Memory", value: capacitySummary(available: store.details.availableMemory, total: store.details.totalMemory))
+                LabeledContent("Storage", value: capacitySummary(available: store.details.availableStorage, total: store.details.totalStorage))
+            }
+
+            Section("Network") {
+                TechnicalRow(label: "IP Address", value: store.details.ipAddress, monospacedValue: true, allowsCopy: true)
+            }
+
+            Section {
+                DisclosureGroup("Raw Properties", isExpanded: $rawPropertiesExpanded) {
+                    TechnicalRow(label: "CPU ABI", value: store.details.cpuAbi, monospacedValue: true, allowsCopy: true)
+                    TechnicalRow(label: "Build Fingerprint", value: store.details.buildFingerprint, monospacedValue: true, allowsCopy: true)
+                    TechnicalRow(label: "Android Device Name", value: store.details.deviceName, monospacedValue: true, allowsCopy: true)
+                }
+            } footer: {
+                if let lastUpdated {
+                    Text("Refreshed \(lastUpdated.formatted(date: .abbreviated, time: .shortened))")
+                } else {
+                    Text("Refresh to update device properties.")
+                }
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    rebootConfirmations = Dictionary(uniqueKeysWithValues: ["", "recovery", "bootloader"].compactMap { mode in
+                        store.remoteTarget.confirmation(for: "reboot:\(mode)").map { (mode, $0) }
+                    })
+                    showingRebootMenu = true
+                } label: {
+                    Label("Reboot \(store.remoteTarget.deviceName)", systemImage: "arrow.clockwise.circle")
+                        .frame(minHeight: IADBDesign.minimumHitTarget)
+                }
+                .disabled(store.isRebooting || !store.remoteTarget.isConnected)
+            } header: {
+                Text("Danger Zone")
+            } footer: {
+                Text("Reboot disconnects the current ADB session. Choose the boot mode only after confirming the target device.")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(IADBScreenBackground())
+        .navigationTitle("Device Info")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { toolbarContent }
+        .confirmationDialog("Reboot Mode", isPresented: $showingRebootMenu) {
+            Button("Normal Reboot") {
+                store.send(.reboot(mode: "", confirmation: rebootConfirmations[""]))
+            }
+            Button("Recovery") {
+                store.send(.reboot(
+                    mode: "recovery",
+                    confirmation: rebootConfirmations["recovery"]
+                ))
+            }
+            Button("Bootloader") {
+                store.send(.reboot(
+                    mode: "bootloader",
+                    confirmation: rebootConfirmations["bootloader"]
+                ))
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("\(store.remoteTarget.deviceName) will restart and the current ADB session will disconnect.")
+        }
+        .sheet(isPresented: $showingExportSheet) {
+            ShareTextSheet(text: store.details.snapshotText, fileName: "device-snapshot.txt")
+        }
+    }
+
+    private func capacitySummary(available: String, total: String) -> String {
+        switch (available.isEmpty, total.isEmpty) {
+        case (true, true): "—"
+        case (false, true): String(localized: "\(available) available")
+        case (true, false): total
+        case (false, false): String(localized: "\(available) of \(total) free")
+        }
+    }
+
+    /*
+     Legacy card helpers remain below while downstream screen slices migrate
+     their previews. The live Device Details composition above is a native List.
+     */
+    private var legacyCardContent: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: IADBDesign.sectionSpacing) {
                 statusArea
@@ -76,41 +208,24 @@ struct DeviceInfoView: View {
             }
             .padding(IADBDesign.contentPadding)
             .padding(.bottom, 24)
-            .iadbContentWidth()
-        }
-        .background(IADBScreenBackground())
-        .navigationTitle("Device Info")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar { toolbarContent }
-        .confirmationDialog("Reboot Mode", isPresented: $showingRebootMenu) {
-            Button("Normal Reboot") {
-                store.send(.reboot(mode: ""))
-            }
-            Button("Recovery") {
-                store.send(.reboot(mode: "recovery"))
-            }
-            Button("Bootloader") {
-                store.send(.reboot(mode: "bootloader"))
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("The current ADB session will disconnect while Android restarts.")
-        }
-        .sheet(isPresented: $showingExportSheet) {
-            ShareTextSheet(text: store.details.snapshotText, fileName: "device-snapshot.txt")
+            .iadbReadableWidth(maxWidth: 820)
         }
     }
 
     @ViewBuilder
     private var statusArea: some View {
         if store.isLoading {
-            StatusBannerView(style: .progress, message: "Loading device info…", showsProgress: true)
+            StatusBannerView(
+                style: .progress,
+                message: String(localized: "Loading device info…"),
+                showsProgress: true
+            )
         }
 
         if store.isRebooting {
             StatusBannerView(
                 style: .progress,
-                message: "Sending reboot command…",
+                message: String(localized: "Sending reboot command…"),
                 showsProgress: true
             )
         } else if let rebootStatus = store.rebootStatusMessage {
@@ -128,7 +243,7 @@ struct DeviceInfoView: View {
         }
 
         if copiedSnapshot {
-            StatusBannerView(style: .success, message: "Device snapshot copied")
+            StatusBannerView(style: .success, message: String(localized: "Device snapshot copied"))
                 .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
         }
     }
@@ -204,25 +319,25 @@ struct DeviceInfoView: View {
             ],
             spacing: IADBDesign.spacing
         ) {
-            IADBMetricCard(
+            LabeledMetric(
                 title: "Android",
                 value: store.details.androidVersion,
                 symbol: "a.square.fill",
                 tint: .green
             )
-            IADBMetricCard(
+            LabeledMetric(
                 title: "Battery",
                 value: batteryDisplay,
                 symbol: batteryIcon,
                 tint: batteryTint
             )
-            IADBMetricCard(
+            LabeledMetric(
                 title: "Available RAM",
                 value: store.details.availableMemory,
                 symbol: "memorychip.fill",
                 tint: .purple
             )
-            IADBMetricCard(
+            LabeledMetric(
                 title: "Display",
                 value: store.details.screenResolution,
                 symbol: "rectangle.dashed",
@@ -236,6 +351,9 @@ struct DeviceInfoView: View {
             IADBSectionHeader("Device Actions")
             IADBCard {
                 Button {
+                    rebootConfirmations = Dictionary(uniqueKeysWithValues: ["", "recovery", "bootloader"].compactMap { mode in
+                        store.remoteTarget.confirmation(for: "reboot:\(mode)").map { (mode, $0) }
+                    })
                     showingRebootMenu = true
                 } label: {
                     HStack(spacing: IADBDesign.spacing) {
@@ -294,6 +412,7 @@ struct DeviceInfoView: View {
     }
 
     private func showCopiedConfirmation() {
+        announceAccessibility("Device snapshot copied")
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
             copiedSnapshot = true
         }
@@ -307,12 +426,14 @@ struct DeviceInfoView: View {
     private var deviceSubtitle: String {
         let parts = [store.details.manufacturer, store.details.deviceName]
             .filter { !$0.isEmpty }
-        return parts.isEmpty ? "Android device information" : parts.joined(separator: " · ")
+        return parts.isEmpty
+            ? String(localized: "Android device information")
+            : parts.joined(separator: " · ")
     }
 
     private var batteryDisplay: String {
         let level = store.details.batteryLevel
-        let status = store.details.batteryStatus
+        let status = store.details.localizedBatteryStatus
         return switch (level.isEmpty, status.isEmpty) {
         case (true, true): ""
         case (false, true): level
@@ -338,8 +459,7 @@ struct DeviceInfoView: View {
 
     private var errorRecoveryTitle: String? {
         switch store.errorRecovery {
-        case .fetch: "Retry Refresh"
-        case .reboot: "Retry Reboot"
+        case .fetch: String(localized: "Retry Refresh")
         case nil: nil
         }
     }
@@ -349,6 +469,12 @@ private struct DeviceInfoItem {
     let label: String
     let value: String
     var icon: String?
+
+    init(label: LocalizedStringResource, value: String, icon: String? = nil) {
+        self.label = String(localized: label)
+        self.value = value
+        self.icon = icon
+    }
 }
 
 private struct DeviceInfoSection: View {
@@ -356,9 +482,15 @@ private struct DeviceInfoSection: View {
     let symbol: String
     let rows: [DeviceInfoItem]
 
+    init(title: LocalizedStringResource, symbol: String, rows: [DeviceInfoItem]) {
+        self.title = String(localized: title)
+        self.symbol = symbol
+        self.rows = rows
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: IADBDesign.spacing) {
-            IADBSectionHeader(title) {
+            IADBSectionHeader(localizedTitle: title) {
                 Image(systemName: symbol)
                     .foregroundStyle(.secondary)
                     .accessibilityHidden(true)
@@ -366,7 +498,13 @@ private struct DeviceInfoSection: View {
             IADBCard {
                 VStack(spacing: 0) {
                     ForEach(Array(rows.enumerated()), id: \.offset) { index, row in
-                        InfoRow(label: row.label, value: row.value, icon: row.icon)
+                        TechnicalRow(
+                            localizedLabel: row.label,
+                            value: row.value,
+                            icon: row.icon,
+                            monospacedValue: row.label == "Serial" || row.label == "Build Fingerprint",
+                            allowsCopy: true
+                        )
                         if index < rows.count - 1 {
                             Divider()
                                 .padding(.leading, row.icon == nil ? 0 : 34)
@@ -375,108 +513,5 @@ private struct DeviceInfoSection: View {
                 }
             }
         }
-    }
-}
-
-struct InfoRow: View {
-    let label: String
-    let value: String
-    var icon: String? = nil
-
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-
-    var body: some View {
-        HStack(alignment: .top, spacing: IADBDesign.compactSpacing) {
-            accessibleInformation
-
-            if !value.isEmpty {
-                copyMenu
-            }
-        }
-        .padding(.vertical, 11)
-    }
-
-    @ViewBuilder
-    private var accessibleInformation: some View {
-        if value.isEmpty {
-            information
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(label), not available")
-        } else {
-            information
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(label), \(value)")
-                .accessibilityAction(named: "Copy \(label)") {
-                    copyValue()
-                }
-        }
-    }
-
-    @ViewBuilder
-    private var information: some View {
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: IADBDesign.compactSpacing) {
-                labelView
-                valueView
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        } else {
-            HStack(alignment: .firstTextBaseline, spacing: IADBDesign.compactSpacing) {
-                labelView
-                Spacer(minLength: 12)
-                valueView
-                    .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-                    .layoutPriority(1)
-            }
-            .frame(maxWidth: .infinity)
-        }
-    }
-
-    private var labelView: some View {
-        HStack(alignment: .firstTextBaseline, spacing: IADBDesign.compactSpacing) {
-            if let icon {
-                Image(systemName: icon)
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 26)
-                    .accessibilityHidden(true)
-            }
-            Text(label)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var valueView: some View {
-        Text(value.isEmpty ? "—" : value)
-            .font(.subheadline.weight(.medium))
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
-    }
-
-    private var copyMenu: some View {
-        Menu {
-            Button {
-                copyValue()
-            } label: {
-                Label("Copy Value", systemImage: "doc.on.doc")
-            }
-        } label: {
-            Image(systemName: "doc.on.doc")
-                .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-        .accessibilityLabel("Copy \(label)")
-        .accessibilityHint("Opens copy actions")
-    }
-
-    private func copyValue() {
-        UIPasteboard.general.string = value
     }
 }

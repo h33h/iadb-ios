@@ -19,36 +19,66 @@ final class AppStoreScreenshotTests: XCTestCase {
         openTab("Files", in: app)
         XCTAssertTrue(element(containingLabel: "Photos", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(element(containingLabel: "demo-build.apk", in: app).exists)
+        selectRegularWidthInspector(
+            rowContaining: "release-notes.txt",
+            navigationTitle: "File Inspector",
+            in: app
+        )
         capture("02-files", in: app)
 
         openTab("Console", in: app)
         XCTAssertTrue(app.navigationBars["Console"].waitForExistence(timeout: 5))
 
-        selectConsoleMode("Shell", in: app)
-        XCTAssertTrue(app.staticTexts["Pinned commands"].waitForExistence(timeout: 5))
+        selectConsoleMode("Command Runner", in: app)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["Pinned Commands"].waitForExistence(timeout: 5)
+        )
         XCTAssertTrue(
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label CONTAINS 'getprop ro.build.version.release'"))
                 .firstMatch.waitForExistence(timeout: 5)
         )
-        XCTAssertTrue(
-            app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Actions for '"))
-                .firstMatch.exists
+        let historyEntry = app.descendants(matching: .any)["shell.history.entry"].firstMatch
+        XCTAssertTrue(historyEntry.exists)
+        XCTAssertTrue(historyEntry.label.contains("exit code 0"))
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Actions for '")).count,
+            0
         )
+        if usesRegularWidthWorkspace(app) {
+            historyEntry.tap()
+            XCTAssertTrue(app.navigationBars["Command Output"].waitForExistence(timeout: 5))
+        }
         capture("03-shell", in: app)
 
-        selectConsoleMode("Logs", in: app)
+        selectConsoleMode("Logcat", in: app)
         XCTAssertTrue(
             app.descendants(matching: .any)
                 .matching(NSPredicate(format: "label CONTAINS 'Dashboard ready in 184 ms'"))
                 .firstMatch.waitForExistence(timeout: 5)
         )
-        XCTAssertTrue(app.buttons["Manage saved filters"].exists)
+        XCTAssertTrue(app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH 'Filter logs'")
+        ).firstMatch.exists)
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == 'Actions for log entry'")).count,
+            0
+        )
+        selectRegularWidthInspector(
+            rowContaining: "Dashboard ready in 184 ms",
+            navigationTitle: "Log Details",
+            in: app
+        )
         capture("05-logs", in: app)
 
         openTab("Apps", in: app)
         XCTAssertTrue(element(containingLabel: "Aurora Notes", in: app).waitForExistence(timeout: 5))
         XCTAssertTrue(element(containingLabel: "Canvas Demo", in: app).exists)
+        selectRegularWidthInspector(
+            rowContaining: "Aurora Notes",
+            navigationTitle: "App Inspector",
+            in: app
+        )
         capture("04-apps", in: app)
 
         openTab("Screens", in: app)
@@ -58,8 +88,20 @@ final class AppStoreScreenshotTests: XCTestCase {
                 .matching(NSPredicate(format: "label BEGINSWITH 'Screenshot from'"))
                 .firstMatch.waitForExistence(timeout: 5)
         )
-        XCTAssertTrue(app.buttons["Actions for screenshot"].firstMatch.exists)
+        XCTAssertEqual(app.buttons.matching(
+            NSPredicate(format: "label == 'Actions for screenshot'")
+        ).count, 0)
+        XCTAssertTrue(app.descendants(matching: .any)["screens.primary.capture"].exists)
+        XCTAssertTrue(app.buttons["Select"].exists)
         revealLowerContentOnCompactScreen(in: app)
+        if usesRegularWidthWorkspace(app) {
+            let screenshot = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label BEGINSWITH 'Screenshot from'"))
+                .firstMatch
+            XCTAssertTrue(screenshot.isHittable)
+            screenshot.tap()
+            XCTAssertTrue(app.navigationBars["Screenshot Details"].waitForExistence(timeout: 5))
+        }
         capture("06-screens", in: app)
     }
 
@@ -84,15 +126,12 @@ final class AppStoreScreenshotTests: XCTestCase {
     @MainActor
     private func configureOrientation(for app: XCUIApplication) {
         let window = app.windows.firstMatch
-        let isIPad = max(window.frame.width, window.frame.height) >= 1_000
-        let requestedOrientation: UIDeviceOrientation = isIPad ? .landscapeLeft : .portrait
+        let requestedOrientation: UIDeviceOrientation = .portrait
         XCUIDevice.shared.orientation = requestedOrientation
 
         let orientationPredicate = NSPredicate { object, _ in
             guard let element = object as? XCUIElement else { return false }
-            return isIPad
-                ? element.frame.width > element.frame.height
-                : element.frame.height > element.frame.width
+            return element.frame.height > element.frame.width
         }
         let expectation = XCTNSPredicateExpectation(predicate: orientationPredicate, object: window)
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed)
@@ -151,13 +190,17 @@ final class AppStoreScreenshotTests: XCTestCase {
     @MainActor
     private func tabItem(_ name: String, in app: XCUIApplication) -> XCUIElement {
         let tabBarButton = app.tabBars.buttons[name].firstMatch
-        if tabBarButton.exists { return tabBarButton }
+        if tabBarButton.exists && tabBarButton.isHittable { return tabBarButton }
+
+        let rootIdentifier = "root.\(name.lowercased())"
+        let identified = app.descendants(matching: .any)[rootIdentifier].firstMatch
+        if identified.exists && identified.isHittable { return identified }
 
         let button = app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
-        if button.exists { return button }
+        if button.exists && button.isHittable { return button }
 
         let cell = app.cells.matching(NSPredicate(format: "label == %@", name)).firstMatch
-        if cell.exists { return cell }
+        if cell.exists && cell.isHittable { return cell }
 
         return app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@", name))
@@ -169,6 +212,31 @@ final class AppStoreScreenshotTests: XCTestCase {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS %@", text))
             .firstMatch
+    }
+
+    @MainActor
+    private func selectRegularWidthInspector(
+        rowContaining text: String,
+        navigationTitle: String,
+        in app: XCUIApplication
+    ) {
+        guard usesRegularWidthWorkspace(app) else { return }
+
+        let row = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", text))
+            .firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 5), "Missing row containing \(text)")
+        XCTAssertTrue(row.isHittable, "Row containing \(text) is not hittable")
+        row.tap()
+        XCTAssertTrue(
+            app.navigationBars[navigationTitle].waitForExistence(timeout: 5),
+            "Missing \(navigationTitle) after selecting \(text)"
+        )
+    }
+
+    @MainActor
+    private func usesRegularWidthWorkspace(_ app: XCUIApplication) -> Bool {
+        app.windows.firstMatch.frame.width >= 1_000
     }
 
     @MainActor

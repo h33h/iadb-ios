@@ -5,7 +5,7 @@ This directory contains the source material for the iADB product page.
 ## Screenshot sets
 
 - `screenshots/iphone-6.9`: 1320 × 2868 portrait PNG
-- `screenshots/ipad-13`: 2752 × 2064 landscape PNG
+- `screenshots/ipad-13`: 2064 × 2752 portrait PNG
 
 Use the `--app-store-screenshots` launch argument. It loads fictional device
 data and disables network access so captures never expose a real address,
@@ -15,9 +15,9 @@ The six screenshots follow this product story:
 
 1. Android tools on your iPhone — connected device dashboard
 2. Browse and manage files — `/sdcard/Download`
-3. Run ADB shell anywhere — safe command, output, history, and pins
+3. Run a one-shot command — streamed output, exit status, history, and pins
 4. Inspect installed apps — search, filters, app actions
-5. Find the signal in Logcat — clean fictional logs and filters
+5. Find the signal in Logcat — bounded fictional logs, filters, and capture controls
 6. Capture and share the screen — gallery and viewer
 
 ## Capture rules
@@ -44,7 +44,7 @@ scripts/capture-app-store-screenshots.sh
 The script regenerates the Xcode project, creates or reuses dedicated App
 Store simulators, fixes the status bar at 9:41, and runs only
 `AppStoreScreenshotTests`. It exports six stable attachments for Device,
-Files, Console Shell, Apps, Console Logs, and Screens. The export is rejected
+Files, Command Runner, Apps, Logcat, and Screens. The export is rejected
 unless every PNG has the required dimensions, 8-bit components, and no alpha
 channel. Existing output is replaced only after the complete set validates.
 

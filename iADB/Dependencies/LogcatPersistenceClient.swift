@@ -6,29 +6,209 @@ struct LogcatPreset: Equatable, Codable, Identifiable {
     var name: String
     var filterText: String
     var level: LogEntry.LogLevel?
+    var levels: Set<LogEntry.LogLevel>
+    var originDeviceID: String
+    var includedTags: Set<String>
+    var excludedTerms: [String]
+    var pid: Int?
+    var isGlobal: Bool
 
-    init(id: UUID = UUID(), name: String, filterText: String, level: LogEntry.LogLevel?) {
+    init(
+        id: UUID = UUID(),
+        name: String,
+        filterText: String,
+        level: LogEntry.LogLevel?,
+        originDeviceID: String = DeviceIdentity.unknownID,
+        includedTags: Set<String> = [],
+        excludedTerms: [String] = [],
+        pid: Int? = nil,
+        isGlobal: Bool = false
+    ) {
         self.id = id
         self.name = name
         self.filterText = filterText
         self.level = level
+        self.levels = level.map { [$0] } ?? []
+        self.originDeviceID = originDeviceID
+        self.includedTags = includedTags
+        self.excludedTerms = excludedTerms
+        self.pid = pid
+        self.isGlobal = isGlobal
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, filterText, level, levels, originDeviceID
+        case includedTags, excludedTerms, pid, isGlobal
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        filterText = try container.decode(String.self, forKey: .filterText)
+        level = try container.decodeIfPresent(LogEntry.LogLevel.self, forKey: .level)
+        levels = try container.decodeIfPresent(Set<LogEntry.LogLevel>.self, forKey: .levels)
+            ?? level.map { [$0] }
+            ?? []
+        originDeviceID = try container.decodeIfPresent(String.self, forKey: .originDeviceID)
+            ?? DeviceIdentity.unknownID
+        includedTags = try container.decodeIfPresent(Set<String>.self, forKey: .includedTags) ?? []
+        excludedTerms = try container.decodeIfPresent([String].self, forKey: .excludedTerms) ?? []
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        isGlobal = try container.decodeIfPresent(Bool.self, forKey: .isGlobal) ?? false
     }
 }
 
+struct LogcatFilter: Equatable, Codable {
+    var levels: Set<LogEntry.LogLevel>
+    var query: String
+    var includedTags: Set<String>
+    var excludedTerms: [String]
+    var pid: Int?
+
+    init(
+        levels: Set<LogEntry.LogLevel> = [],
+        query: String = "",
+        includedTags: Set<String> = [],
+        excludedTerms: [String] = [],
+        pid: Int? = nil
+    ) {
+        self.levels = levels
+        self.query = query
+        self.includedTags = includedTags
+        self.excludedTerms = excludedTerms
+        self.pid = pid
+    }
+
+    init(filterText: String, selectedLevel: LogEntry.LogLevel?) {
+        self.init(
+            levels: selectedLevel.map { [$0] } ?? [],
+            query: filterText
+        )
+    }
+
+    var filterText: String {
+        get { query }
+        set { query = newValue }
+    }
+
+    var selectedLevel: LogEntry.LogLevel? {
+        get { levels.count == 1 ? levels.first : nil }
+        set { levels = newValue.map { [$0] } ?? [] }
+    }
+
+    static let empty = Self()
+
+    private enum CodingKeys: String, CodingKey {
+        case levels, query, includedTags, excludedTerms, pid
+        case filterText, selectedLevel
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let legacyLevel = try container.decodeIfPresent(LogEntry.LogLevel.self, forKey: .selectedLevel)
+        levels = try container.decodeIfPresent(Set<LogEntry.LogLevel>.self, forKey: .levels)
+            ?? legacyLevel.map { [$0] }
+            ?? []
+        query = try container.decodeIfPresent(String.self, forKey: .query)
+            ?? container.decodeIfPresent(String.self, forKey: .filterText)
+            ?? ""
+        includedTags = try container.decodeIfPresent(Set<String>.self, forKey: .includedTags) ?? []
+        excludedTerms = try container.decodeIfPresent([String].self, forKey: .excludedTerms) ?? []
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(levels, forKey: .levels)
+        try container.encode(query, forKey: .query)
+        try container.encode(includedTags, forKey: .includedTags)
+        try container.encode(excludedTerms, forKey: .excludedTerms)
+        try container.encodeIfPresent(pid, forKey: .pid)
+    }
+}
+
+typealias LogcatFilterSettings = LogcatFilter
+
 struct LogcatPersistenceState: Equatable, Codable {
-    var filterText: String
-    var selectedLevel: LogEntry.LogLevel?
+    static let currentVersion = 3
+
+    var version: Int
+    var filtersByDeviceID: [String: LogcatFilter]
     var presets: [LogcatPreset]
 
     static let maximumTextBytes = 4 * 1024
     static let maximumPresetCount = 50
     static let maximumBlobBytes = 256 * 1024
 
+    init(
+        version: Int = currentVersion,
+        filtersByDeviceID: [String: LogcatFilter],
+        presets: [LogcatPreset]
+    ) {
+        self.version = version
+        self.filtersByDeviceID = filtersByDeviceID
+        self.presets = presets
+    }
+
+    /// Source-compatible v1 initializer. Legacy filters and presets are kept
+    /// under an explicit unknown origin and are never assigned to a real device.
+    init(filterText: String, selectedLevel: LogEntry.LogLevel?, presets: [LogcatPreset]) {
+        self.init(
+            filtersByDeviceID: [
+                DeviceIdentity.unknownID: LogcatFilter(
+                    filterText: filterText,
+                    selectedLevel: selectedLevel
+                )
+            ],
+            presets: presets.map {
+                LogcatPreset(
+                    id: $0.id,
+                    name: $0.name,
+                    filterText: $0.filterText,
+                    level: $0.level,
+                    originDeviceID: $0.originDeviceID
+                )
+            }
+        )
+    }
+
+    var filterText: String {
+        get { filtersByDeviceID[DeviceIdentity.unknownID]?.filterText ?? "" }
+        set {
+            var settings = filtersByDeviceID[DeviceIdentity.unknownID] ?? .empty
+            settings.filterText = newValue
+            filtersByDeviceID[DeviceIdentity.unknownID] = settings
+        }
+    }
+
+    var selectedLevel: LogEntry.LogLevel? {
+        get { filtersByDeviceID[DeviceIdentity.unknownID]?.selectedLevel }
+        set {
+            var settings = filtersByDeviceID[DeviceIdentity.unknownID] ?? .empty
+            settings.selectedLevel = newValue
+            filtersByDeviceID[DeviceIdentity.unknownID] = settings
+        }
+    }
+
     static var empty: Self {
-        Self(filterText: "", selectedLevel: nil, presets: [])
+        Self(filtersByDeviceID: [:], presets: [])
     }
 
     func sanitized() -> Self {
+        var sanitizedFilters: [String: LogcatFilter] = [:]
+        for (rawDeviceID, settings) in filtersByDeviceID {
+            let deviceID = rawDeviceID.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !deviceID.isEmpty else { continue }
+            sanitizedFilters[deviceID] = LogcatFilter(
+                levels: Set(settings.levels.filter { $0 != .silent && $0 != .unknown }),
+                query: Self.boundedText(settings.query),
+                includedTags: Set(settings.includedTags.map(Self.boundedText).filter { !$0.isEmpty }),
+                excludedTerms: settings.excludedTerms.map(Self.boundedText).filter { !$0.isEmpty },
+                pid: settings.pid
+            )
+        }
+
         var seenPresetIDs = Set<UUID>()
         var sanitizedPresets: [LogcatPreset] = []
         sanitizedPresets.reserveCapacity(min(presets.count, Self.maximumPresetCount))
@@ -38,22 +218,23 @@ struct LogcatPersistenceState: Equatable, Codable {
             let name = Self.boundedText(preset.name)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { continue }
+            let origin = preset.originDeviceID.trimmingCharacters(in: .whitespacesAndNewlines)
             sanitizedPresets.append(LogcatPreset(
                 id: preset.id,
                 name: name,
                 filterText: Self.boundedText(preset.filterText),
-                level: preset.level
+                level: preset.level,
+                originDeviceID: origin.isEmpty ? DeviceIdentity.unknownID : origin,
+                includedTags: Set(preset.includedTags.map(Self.boundedText).filter { !$0.isEmpty }),
+                excludedTerms: preset.excludedTerms.map(Self.boundedText).filter { !$0.isEmpty },
+                pid: preset.pid,
+                isGlobal: preset.isGlobal
             ))
+            sanitizedPresets[sanitizedPresets.index(before: sanitizedPresets.endIndex)].levels =
+                Set(preset.levels.filter { $0 != .silent && $0 != .unknown })
         }
 
-        var result = Self(
-            filterText: Self.boundedText(filterText),
-            selectedLevel: selectedLevel,
-            presets: sanitizedPresets
-        )
-
-        // Fifty presets at their individual limits can exceed the aggregate
-        // persistence limit. Keep the newest prefix that fits the blob.
+        var result = Self(filtersByDeviceID: sanitizedFilters, presets: sanitizedPresets)
         guard Self.encodedSize(of: result) > Self.maximumBlobBytes else {
             return result
         }
@@ -83,12 +264,39 @@ struct LogcatPersistenceState: Equatable, Codable {
         return data
     }
 
-    static func decodedFromPersistence(_ data: Data) -> Self? {
-        guard data.count <= maximumBlobBytes,
-              let decoded = try? JSONDecoder().decode(Self.self, from: data) else {
-            return nil
+    static func decodeMigrating(_ data: Data) -> (state: Self, wasLegacy: Bool)? {
+        guard data.count <= maximumBlobBytes else { return nil }
+        let decoder = JSONDecoder()
+        if var decoded = try? decoder.decode(Self.self, from: data) {
+            switch decoded.version {
+            case currentVersion:
+                return (decoded.sanitized(), false)
+            case 2:
+                decoded.version = currentVersion
+                return (decoded.sanitized(), true)
+            default:
+                break
+            }
         }
-        return decoded.sanitized()
+
+        struct Legacy: Codable {
+            var filterText: String
+            var selectedLevel: LogEntry.LogLevel?
+            var presets: [LogcatPreset]
+        }
+        guard let legacy = try? decoder.decode(Legacy.self, from: data) else { return nil }
+        return (
+            Self(
+                filterText: legacy.filterText,
+                selectedLevel: legacy.selectedLevel,
+                presets: legacy.presets
+            ).sanitized(),
+            true
+        )
+    }
+
+    static func decodedFromPersistence(_ data: Data) -> Self? {
+        decodeMigrating(data)?.state
     }
 
     static func boundedText(_ text: String) -> String {
@@ -136,19 +344,23 @@ extension LogcatPersistenceClient: DependencyKey {
         let defaults = SendableUserDefaults(defaults)
         return Self(
             load: {
-                guard let data = defaults.value.data(forKey: key) else {
+                guard let source = defaults.value.data(forKey: key) else {
+                    return .empty
+                }
+                guard let decoded = LogcatPersistenceState.decodeMigrating(source) else {
+                    // Recovery must not destroy data that a future app version or
+                    // a user-assisted repair may still be able to understand.
                     return .empty
                 }
 
-                guard let state = LogcatPersistenceState.decodedFromPersistence(data) else {
-                    defaults.value.removeObject(forKey: key)
-                    return .empty
+                if let encoded = decoded.state.encodedForPersistence(),
+                   decoded.wasLegacy || encoded != source {
+                    defaults.value.set(encoded, forKey: key)
+                    if defaults.value.data(forKey: key) != encoded {
+                        defaults.value.set(source, forKey: key)
+                    }
                 }
-
-                if let sanitizedData = state.encodedForPersistence(), sanitizedData != data {
-                    defaults.value.set(sanitizedData, forKey: key)
-                }
-                return state
+                return decoded.state
             },
             save: { state in
                 guard let data = state.encodedForPersistence() else { return }

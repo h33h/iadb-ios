@@ -81,7 +81,7 @@ capture_target() {
   local attachments_directory="$WORK_ROOT/$label-attachments"
   local derived_data="$WORK_ROOT/DerivedData-$label"
 
-  rm -rf -- "$result_bundle" "$attachments_directory"
+  rm -rf -- "$result_bundle" "$attachments_directory" "$derived_data"
   prepare_status_bar "$udid"
 
   echo "Capturing $label screenshots on $udid"
@@ -159,8 +159,8 @@ if [[ "$TARGETS" == "all" || "$TARGETS" == "ipad" ]]; then
   capture_target \
     "ipad-13" \
     "$IPAD_UDID" \
-    2752 \
     2064 \
+    2752 \
     "$ROOT/app-store/screenshots/ipad-13"
 fi
 

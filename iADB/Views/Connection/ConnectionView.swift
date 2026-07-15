@@ -2,6 +2,35 @@ import SwiftUI
 import ComposableArchitecture
 import UIKit
 
+struct ConnectionsFlowView: View {
+    @Bindable var store: StoreOf<ConnectionFeature>
+    var allowsDismissWhenConnected: Bool
+    var startsDiscoveryOnAppear = true
+
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ConnectionView(
+                store: store,
+                isEmbeddedInNavigationStack: false,
+                startsDiscoveryOnAppear: startsDiscoveryOnAppear
+            )
+            .toolbar {
+                if allowsDismissWhenConnected && store.connectionState.isConnected {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { dismiss() }
+                            .accessibilityIdentifier("connections.done")
+                    }
+                }
+            }
+        }
+        .interactiveDismissDisabled(
+            !allowsDismissWhenConnected || !store.connectionState.isConnected
+        )
+    }
+}
+
 struct ConnectionView: View {
     @Bindable var store: StoreOf<ConnectionFeature>
     var isEmbeddedInNavigationStack = false
@@ -26,56 +55,137 @@ struct ConnectionView: View {
     }
 
     private var content: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: IADBDesign.sectionSpacing) {
-                connectionStatusCard
-
+        List {
+            Section("Current") {
+                currentConnectionRow
                 if let error = store.lastConnectionError {
-                    recoveryCard(error: error)
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.red)
+                    Button("Dismiss Error") { store.send(.clearConnectionError) }
                 }
+                currentConnectionAction
+            }
 
-                if store.manualConnection != nil {
-                    manualConnectionCard
-                }
-
-                if !store.connectionState.isConnected {
-                    if isFirstRun {
-                        firstRunCard
-                    } else {
-                        pairActionCard
+            Section {
+                if let discoveryError = store.discoveryError {
+                    Label(discoveryError, systemImage: "wifi.exclamationmark")
+                        .foregroundStyle(.orange)
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            openURL(url)
+                        }
+                    }
+                    Button("Refresh", systemImage: "arrow.clockwise") { store.send(.rescan) }
+                        .accessibilityIdentifier("connections.refresh")
+                } else if store.discoveredDevices.isEmpty {
+                    ContentUnavailableView {
+                        Label(
+                            store.isScanning ? String(localized: "Looking for devices…") : String(localized: "No Nearby Devices"),
+                            systemImage: "wifi.slash"
+                        )
+                    } description: {
+                        Text(
+                            store.isScanning
+                                ? String(localized: "Discovery continues in the background.")
+                                : String(localized: "Open Wireless debugging on Android, then refresh nearby devices.")
+                        )
+                    } actions: {
+                        if !store.isScanning {
+                            Button("Refresh", systemImage: "arrow.clockwise") {
+                                store.send(.rescan)
+                            }
+                            .buttonStyle(.bordered)
+                            .buttonBorderShape(.roundedRectangle(radius: IADBDesign.controlRadius))
+                            .frame(minHeight: IADBDesign.minimumHitTarget)
+                            .accessibilityIdentifier("connections.refresh")
+                        }
+                    }
+                } else {
+                    ForEach(store.discoveredDevices) { device in
+                        DiscoveredDeviceRow(
+                            device: device,
+                            connectionState: store.connectionState,
+                            isCurrentDevice: store.lastConnectionDevice?.id == device.id,
+                            onTap: {
+                                if device.isPaired {
+                                    store.send(.connectToDevice(device))
+                                } else {
+                                    store.send(.showPairingForDevice(device))
+                                }
+                            },
+                            onRename: pairedDeviceID(for: device).map { pairedID in
+                                { store.send(.requestRenamePairedDevice(id: pairedID)) }
+                            },
+                            onForget: pairedDeviceID(for: device).map { pairedID in
+                                { store.send(.requestForgetPairedDevice(id: pairedID)) }
+                            }
+                        )
                     }
                 }
+            } header: {
+                HStack {
+                    Text("Nearby")
+                    Spacer()
+                    if store.isScanning { ProgressView().controlSize(.small) }
+                }
+            } footer: {
+                Text("Nearby rows arrive incrementally while discovery is active.")
+            }
 
-                networkDevicesSection
-
-                if !store.offlinePairedDevices.isEmpty {
-                    savedDevicesSection
+            Section("Saved") {
+                if store.offlinePairedDevices.isEmpty {
+                    Text("No offline saved devices")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(store.offlinePairedDevices) { savedDeviceRow($0) }
                 }
             }
-            .padding(IADBDesign.contentPadding)
-            .padding(.bottom, 24)
-            .iadbContentWidth()
+
+            Section {
+                Button {
+                    store.send(.showManualPairing)
+                } label: {
+                    Label("Pair Device", systemImage: "link.badge.plus")
+                        .frame(minHeight: IADBDesign.minimumHitTarget)
+                }
+                .accessibilityIdentifier("connections.pair")
+
+                if store.manualConnection != nil {
+                    manualConnectionFields
+                }
+            } header: {
+                Text("Manual")
+            } footer: {
+                Text("Pairing port creates trust. Connection port starts the regular Wireless debugging session; they are usually different.")
+            }
+
+            Section {
+                Button(role: .destructive) {
+                    store.send(.requestResetADBIdentity)
+                } label: {
+                    Label("Reset ADB Identity", systemImage: "key.slash")
+                        .frame(minHeight: IADBDesign.minimumHitTarget)
+                }
+                .accessibilityIdentifier("connections.resetIdentity")
+            } header: {
+                Text("Security")
+            } footer: {
+                Text(
+                    "Removes the local ADB key and every saved device. Also remove iADB from Android's Wireless debugging paired devices to revoke trust completely."
+                )
+            }
         }
+        .scrollDismissesKeyboard(.interactively)
+        .scrollContentBackground(.hidden)
         .background(IADBScreenBackground())
         .navigationTitle("Connections")
         .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    store.send(.rescan)
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .disabled(store.connectionState == .connecting || store.isScanning)
-                .accessibilityLabel("Rescan")
-            }
-        }
         .onAppear {
             guard startsDiscoveryOnAppear else { return }
             store.send(.onAppear)
         }
         .confirmationDialog(
-            "Forget \(store.pendingForgetDevice?.displayName ?? "this device")?",
+            "Forget \(store.pendingForgetDevice?.displayName ?? String(localized: "this device"))?",
             isPresented: Binding(
                 get: { store.pendingForgetDeviceID != nil },
                 set: { isPresented in
@@ -93,13 +203,126 @@ struct ConnectionView: View {
                 store.send(.cancelForgetPairedDevice)
             }
         } message: {
-            Text(
-                "This disconnects the active session and removes the saved entry. To revoke the key "
-                    + "completely, also remove iADB in Android Settings › Wireless debugging › Paired devices."
-            )
+            Text("This disconnects the active session and removes the saved entry. To revoke the key completely, also remove iADB in Android Settings › Wireless debugging › Paired devices.")
         }
-        .sheet(item: $store.scope(state: \.pairing, action: \.pairing)) { pairingStore in
+        .fullScreenCover(item: $store.scope(state: \.pairing, action: \.pairing)) { pairingStore in
             PairingView(store: pairingStore)
+        }
+        .sheet(
+            isPresented: Binding(
+                get: { store.savedDeviceRename != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        store.send(.cancelRenamePairedDevice)
+                    }
+                }
+            )
+        ) {
+            SavedDeviceRenameView(store: store)
+                .iadbAdaptiveSheetHeight()
+        }
+        .alert(
+            "Reset ADB Identity?",
+            isPresented: Binding(
+                get: { store.isResetIdentityConfirmationPresented },
+                set: { isPresented in
+                    if !isPresented {
+                        store.send(.cancelResetADBIdentity)
+                    }
+                }
+            )
+        ) {
+            Button("Reset Identity", role: .destructive) {
+                store.send(.confirmResetADBIdentity)
+            }
+            Button("Cancel", role: .cancel) {
+                store.send(.cancelResetADBIdentity)
+            }
+        } message: {
+            Text("This removes the ADB key from Keychain, forgets \(store.pairedDevices.count) saved devices, and disconnects. You will need to pair again.")
+        }
+    }
+
+    private var currentConnectionRow: some View {
+        HStack(spacing: IADBDesign.spacing12) {
+            Image(systemName: connectionSymbol)
+                .foregroundStyle(connectionTint)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(store.lastConnectionDevice?.name ?? String(localized: "No active device"))
+                    .font(.body.weight(.semibold))
+                Text(connectionSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let device = store.lastConnectionDevice {
+                    Text("Connection port · \(device.host):\(device.port)")
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: IADBDesign.spacing8)
+            if store.connectionState != .disconnected {
+                IADBStatusBadge(title: connectionTitle, kind: connectionBadgeKind)
+            }
+        }
+        .padding(.vertical, IADBDesign.spacing4)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private var currentConnectionAction: some View {
+        if store.connectionState == .connecting {
+            Button("Cancel Connection", systemImage: "xmark", role: .cancel) {
+                store.send(.cancelConnection)
+            }
+        } else if store.connectionState.isConnected {
+            Button("Disconnect", systemImage: "cable.connector.slash", role: .destructive) {
+                store.send(.disconnect)
+            }
+        } else if store.lastConnectionDevice != nil {
+            Button("Reconnect", systemImage: "arrow.clockwise") {
+                store.send(.reconnectLastDevice)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var manualConnectionFields: some View {
+        if let manual = store.manualConnection {
+            Text("Connect \(manual.deviceName)")
+                .font(.headline)
+            InlineValidatedField("IP address", symbol: "network") {
+                TextField("192.168.1.20", text: Binding(
+                    get: { store.manualConnection?.hostInput ?? "" },
+                    set: { store.send(.manualConnectionHostChanged($0)) }
+                ))
+                .keyboardType(.numbersAndPunctuation)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($focusedField, equals: .host)
+            }
+            InlineValidatedField("Connection port", symbol: "number", validationMessage: manual.validationError) {
+                TextField("37099", text: Binding(
+                    get: { store.manualConnection?.portInput ?? "" },
+                    set: { store.send(.manualConnectionPortChanged($0)) }
+                ))
+                .keyboardType(.numberPad)
+                .focused($focusedField, equals: .port)
+            }
+            HStack {
+                Button("Cancel") {
+                    focusedField = nil
+                    store.send(.dismissManualConnection)
+                }
+                Spacer()
+                Button("Connect") {
+                    focusedField = nil
+                    store.send(.connectManualEndpoint)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.connectionState == .connecting || store.connectionState.isConnected)
+            }
         }
     }
 
@@ -201,7 +424,7 @@ struct ConnectionView: View {
         }
     }
 
-    private func recoveryStep(_ title: String, number: Int) -> some View {
+    private func recoveryStep(_ title: LocalizedStringResource, number: Int) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             Text("\(number)")
                 .font(.caption.weight(.bold))
@@ -214,7 +437,7 @@ struct ConnectionView: View {
                 .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Step \(number), \(title)")
+        .accessibilityLabel("Step \(number), \(String(localized: title))")
     }
 
     @ViewBuilder
@@ -224,10 +447,7 @@ struct ConnectionView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     IADBSectionHeader("Connect \(manualConnection.deviceName)")
 
-                    Text(
-                        "Enter the regular Wireless debugging address shown on Android. "
-                            + "This port is different from the pairing port."
-                    )
+                    Text("Enter the regular Wireless debugging address shown on Android. This port is different from the pairing port.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
@@ -350,7 +570,7 @@ struct ConnectionView: View {
             VStack(alignment: .leading, spacing: 14) {
                 IADBCallout(
                     title: "Add Another Device",
-                    message: "Open Android's pairing-code dialog, then enter the address and six-digit code.",
+                    message: String(localized: "Open Android's pairing-code dialog, then enter the address and six-digit code."),
                     symbol: "link.badge.plus"
                 )
                 Button {
@@ -366,7 +586,11 @@ struct ConnectionView: View {
         }
     }
 
-    private func setupStep(symbol: String, title: String, detail: String) -> some View {
+    private func setupStep(
+        symbol: String,
+        title: LocalizedStringResource,
+        detail: LocalizedStringResource
+    ) -> some View {
         HStack(alignment: .top, spacing: IADBDesign.spacing) {
             IADBIconTile(symbol: symbol)
             VStack(alignment: .leading, spacing: 3) {
@@ -432,12 +656,16 @@ struct ConnectionView: View {
                             .font(.title2)
                             .foregroundStyle(store.isScanning ? Color.accentColor : Color.secondary)
                             .accessibilityHidden(true)
-                        Text(store.isScanning ? "Looking for devices…" : "No devices found")
+                        Text(
+                            store.isScanning
+                                ? String(localized: "Looking for devices…")
+                                : String(localized: "No devices found")
+                        )
                             .font(.subheadline.weight(.semibold))
                         Text(
                             store.isScanning
-                                ? "Discovery usually takes a few seconds."
-                                : "Open Wireless debugging on Android, then rescan."
+                                ? String(localized: "Discovery usually takes a few seconds.")
+                                : String(localized: "Open Wireless debugging on Android, then rescan.")
                         )
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -458,6 +686,9 @@ struct ConnectionView: View {
                                     } else {
                                         store.send(.showPairingForDevice(device))
                                     }
+                                },
+                                onRename: pairedDeviceID(for: device).map { pairedID in
+                                    { store.send(.requestRenamePairedDevice(id: pairedID)) }
                                 },
                                 onForget: pairedDeviceID(for: device).map { pairedID in
                                     { store.send(.requestForgetPairedDevice(id: pairedID)) }
@@ -521,6 +752,11 @@ struct ConnectionView: View {
             .disabled(store.connectionState == .connecting || store.connectionState.isConnected)
 
             Menu {
+                Button {
+                    store.send(.requestRenamePairedDevice(id: pairedDevice.id))
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
                 Button(role: .destructive) {
                     store.send(.requestForgetPairedDevice(id: pairedDevice.id))
                 } label: {
@@ -544,10 +780,10 @@ struct ConnectionView: View {
 
     private var connectionTitle: String {
         switch store.connectionState {
-        case .disconnected: "Not Connected"
-        case .connecting: "Connecting"
-        case .connected: "Connected"
-        case .error: "Connection Failed"
+        case .disconnected: String(localized: "Not Connected")
+        case .connecting: String(localized: "Connecting")
+        case .connected: String(localized: "Connected")
+        case .error: String(localized: "Connection Failed")
         }
     }
 
@@ -555,11 +791,11 @@ struct ConnectionView: View {
         switch store.connectionState {
         case .disconnected:
             store.lastConnectionDevice == nil
-                ? "Pair or select a device to start a secure ADB session."
-                : "Your last device is ready to reconnect when Wireless debugging is available."
-        case .connecting: "Establishing a secure ADB session."
-        case .connected: "ADB tools are available across every workspace."
-        case .error: "Review the recovery steps below, then try again."
+                ? String(localized: "Pair or select a device to start a secure ADB session.")
+                : String(localized: "Your last device is ready to reconnect when Wireless debugging is available.")
+        case .connecting: String(localized: "Establishing a secure ADB session.")
+        case .connected: String(localized: "ADB tools are available across every workspace.")
+        case .error: String(localized: "Review the recovery steps below, then try again.")
         }
     }
 
@@ -598,11 +834,58 @@ struct ConnectionView: View {
     }
 }
 
+private struct SavedDeviceRenameView: View {
+    @Bindable var store: StoreOf<ConnectionFeature>
+    @FocusState private var isNameFocused: Bool
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    InlineValidatedField(
+                        "Device name",
+                        symbol: "pencil",
+                        validationMessage: store.savedDeviceRename?.validationError
+                    ) {
+                        TextField(
+                            "Android device",
+                            text: Binding(
+                                get: { store.savedDeviceRename?.nameInput ?? "" },
+                                set: { store.send(.savedDeviceRenameChanged($0)) }
+                            )
+                        )
+                        .textInputAutocapitalization(.words)
+                        .focused($isNameFocused)
+                        .submitLabel(.done)
+                        .onSubmit { store.send(.confirmRenamePairedDevice) }
+                    }
+                } footer: {
+                    Text("The saved identity and trust key stay unchanged.")
+                }
+            }
+            .navigationTitle("Rename Device")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { store.send(.cancelRenamePairedDevice) }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { store.send(.confirmRenamePairedDevice) }
+                        .fontWeight(.semibold)
+                }
+            }
+            .onAppear { isNameFocused = true }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
 struct DiscoveredDeviceRow: View {
     let device: DiscoveredDevice
     let connectionState: ConnectionState
     let isCurrentDevice: Bool
     let onTap: () -> Void
+    var onRename: (() -> Void)? = nil
     var onForget: (() -> Void)? = nil
 
     var body: some View {
@@ -623,10 +906,17 @@ struct DiscoveredDeviceRow: View {
                 }
             }
 
-            if let onForget, device.isPaired {
+            if device.isPaired, onRename != nil || onForget != nil {
                 Menu {
-                    Button(role: .destructive, action: onForget) {
-                        Label("Forget", systemImage: "trash")
+                    if let onRename {
+                        Button(action: onRename) {
+                            Label("Rename", systemImage: "pencil")
+                        }
+                    }
+                    if let onForget {
+                        Button(role: .destructive, action: onForget) {
+                            Label("Forget", systemImage: "trash")
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
@@ -637,8 +927,10 @@ struct DiscoveredDeviceRow: View {
             }
         }
         .padding(.vertical, 8)
+        .iadbSelectionHighlight(isSelected: connectionState.isConnected && isCurrentDevice)
         .foregroundStyle(.primary)
         .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(connectionState.isConnected && isCurrentDevice ? .isSelected : [])
     }
 
     private var rowContent: some View {
@@ -665,12 +957,12 @@ struct DiscoveredDeviceRow: View {
     }
 
     private var statusText: String {
-        if connectionState.isConnected && isCurrentDevice { return "Connected" }
-        if connectionState.isConnected { return "Disconnect current device first" }
-        if connectionState == .connecting && isCurrentDevice { return "Connecting…" }
-        if device.isPaired { return "Paired · tap to connect" }
-        if device.pairingPort != nil { return "Ready to pair" }
-        return "Open pairing-code dialog on Android"
+        if connectionState.isConnected && isCurrentDevice { return String(localized: "Connected") }
+        if connectionState.isConnected { return String(localized: "Disconnect current device first") }
+        if connectionState == .connecting && isCurrentDevice { return String(localized: "Connecting…") }
+        if device.isPaired { return String(localized: "Paired · tap to connect") }
+        if device.pairingPort != nil { return String(localized: "Ready to pair") }
+        return String(localized: "Open pairing-code dialog on Android")
     }
 
     private var statusColor: Color {
