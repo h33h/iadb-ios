@@ -9,9 +9,6 @@ enum ShellEvent: Equatable, Sendable {
     case stdout(Data)
     case stderr(Data)
     case exit(Int32)
-    /// Older adbd versions cannot separate stderr or deliver live output
-    /// without exposing the marker used to recover the exit status.
-    case legacyFallback
 }
 
 /// Quote one argument for Android's POSIX-compatible shell.
@@ -207,30 +204,17 @@ final class ADBClient: @unchecked Sendable {
 extension ADBClient {
     // MARK: - Shell Commands
 
-    /// Execute a command using shell protocol v2, including its explicit EXIT
-    /// packet. Older devices fall back to a marker-based legacy shell wrapper.
+    /// Execute a command using shell protocol v2, including its explicit EXIT packet.
     func shell(_ command: String) async throws -> String {
-        do {
-            return try await shellV2(command)
-        } catch ADBError.commandFailed(let message)
-            where message.hasPrefix("Stream rejected for:") {
-            return try await legacyShell(command)
-        }
+        try await shellV2(command)
     }
 
-    /// Opens one command session and emits shell-v2 stdout, stderr and exit
-    /// packets in transport order. Devices without shell v2 use a bounded,
-    /// explicitly marked legacy fallback.
+    /// Opens one command session and emits shell-v2 packets in transport order.
     func openShellCommand(
         _ command: String
     ) async throws -> AsyncThrowingStream<ShellEvent, Error> {
-        do {
-            let stream = try await openStream(destination: "shell,v2,raw:\(command)")
-            return shellV2EventStream(stream)
-        } catch ADBError.commandFailed(let message)
-            where message.hasPrefix("Stream rejected for:") {
-            return try await openLegacyShellCommand(command)
-        }
+        let stream = try await openStream(destination: "shell,v2,raw:\(command)")
+        return shellV2EventStream(stream)
     }
 
     private func shellV2EventStream(
@@ -285,66 +269,6 @@ extension ADBClient {
         }
     }
 
-    private func openLegacyShellCommand(
-        _ command: String
-    ) async throws -> AsyncThrowingStream<ShellEvent, Error> {
-        let marker = "__IADB_EXIT_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
-        let script = "\(command)\nstatus=$?\nprintf '\n\(marker)%d\n' \"$status\""
-        let stream = try await openStream(destination: "shell:sh -c \(adbShellQuote(script))")
-        return AsyncThrowingStream { continuation in
-            let task = Task {
-                var output = Data()
-                continuation.yield(.legacyFallback)
-                do {
-                    while true {
-                        try Task.checkCancellation()
-                        let message = try await stream.readMessage()
-                        switch message.commandType {
-                        case .write:
-                            try appendShellOutput(message.data, to: &output)
-                            try await stream.sendReady()
-                        case .close:
-                            await stream.acknowledgeRemoteClose()
-                            let result = try legacyShellResult(output, marker: marker)
-                            if !result.output.isEmpty {
-                                continuation.yield(.stdout(result.output))
-                            }
-                            continuation.yield(.exit(result.exitCode))
-                            continuation.finish()
-                            return
-                        default:
-                            continue
-                        }
-                    }
-                } catch is CancellationError {
-                    try? await stream.close()
-                    continuation.finish()
-                } catch {
-                    try? await stream.close()
-                    continuation.finish(throwing: error)
-                }
-            }
-            continuation.onTermination = { _ in task.cancel() }
-        }
-    }
-
-    private func legacyShellResult(
-        _ data: Data,
-        marker: String
-    ) throws -> (output: Data, exitCode: Int32) {
-        guard let raw = String(data: data, encoding: .utf8),
-              let markerRange = raw.range(of: marker, options: .backwards) else {
-            throw ADBError.protocolError("Legacy shell response did not include an exit status")
-        }
-        let statusText = raw[markerRange.upperBound...].prefix { $0.isNumber || $0 == "-" }
-        guard let status = Int32(String(statusText)) else {
-            throw ADBError.protocolError("Legacy shell returned an invalid exit status")
-        }
-        let output = String(raw[..<markerRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Data(output.utf8), status)
-    }
-
     private func shellV2(_ command: String) async throws -> String {
         let stream = try await openStream(destination: "shell,v2,raw:\(command)")
         let decoder = ShellV2Decoder()
@@ -393,33 +317,6 @@ extension ADBClient {
         }
     }
 
-    private func legacyShell(_ command: String) async throws -> String {
-        let marker = "__IADB_EXIT_\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))__"
-        let script = "\(command)\nstatus=$?\nprintf '\\n\(marker)%d\\n' \"$status\""
-        let stream = try await openStream(destination: "shell:sh -c \(adbShellQuote(script))")
-        var output = Data()
-
-        do {
-            while true {
-                try Task.checkCancellation()
-                let message = try await stream.readMessage()
-                switch message.commandType {
-                case .write:
-                    try appendShellOutput(message.data, to: &output)
-                    try await stream.sendReady()
-                case .close:
-                    await stream.acknowledgeRemoteClose()
-                    return try parseLegacyShellOutput(output, marker: marker)
-                default:
-                    continue
-                }
-            }
-        } catch {
-            try? await stream.close()
-            throw error
-        }
-    }
-
     private func appendShellOutput(_ chunk: Data, to output: inout Data) throws {
         guard chunk.count <= Self.maximumShellOutputSize,
               output.count <= Self.maximumShellOutputSize - chunk.count else {
@@ -428,28 +325,6 @@ extension ADBClient {
             )
         }
         output.append(chunk)
-    }
-
-    private func parseLegacyShellOutput(_ data: Data, marker: String) throws -> String {
-        guard let raw = String(data: data, encoding: .utf8),
-              let markerRange = raw.range(of: marker, options: .backwards) else {
-            throw ADBError.protocolError("Legacy shell response did not include an exit status")
-        }
-
-        let statusText = raw[markerRange.upperBound...]
-            .prefix { $0.isNumber || $0 == "-" }
-        guard let status = Int(statusText) else {
-            throw ADBError.protocolError("Legacy shell returned an invalid exit status")
-        }
-
-        let output = String(raw[..<markerRange.lowerBound])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == 0 else {
-            throw ADBError.commandFailed(
-                "Exit status \(status): \(output.isEmpty ? "No output" : output)"
-            )
-        }
-        return output
     }
 
     private func decodeShellOutput(_ data: Data) -> String {
@@ -464,10 +339,6 @@ extension ADBClient {
 
     func getDeviceProperty(_ property: String) async throws -> String {
         try await shell("getprop \(adbShellQuote(property))")
-    }
-
-    func getDeviceModel() async throws -> String {
-        try await getDeviceProperty("ro.product.model")
     }
 
     func getAndroidVersion() async throws -> String {
@@ -500,21 +371,6 @@ extension ADBClient {
             .sorted()
     }
 
-    func installAPK(
-        localPath: String,
-        remoteTempPath: String = "/data/local/tmp/install.apk"
-    ) async throws -> String {
-        try await pushFile(localPath: localPath, remotePath: remoteTempPath)
-        do {
-            let result = try await shell("pm install -r \(adbShellQuote(remoteTempPath))")
-            _ = try? await shell("rm -f -- \(adbShellQuote(remoteTempPath))")
-            return result
-        } catch {
-            _ = try? await shell("rm -f -- \(adbShellQuote(remoteTempPath))")
-            throw error
-        }
-    }
-
     func uninstallPackage(_ packageName: String, keepData: Bool = false) async throws -> String {
         let flag = keepData ? "-k " : ""
         return try await shell("pm uninstall \(flag)\(adbShellQuote(packageName))")
@@ -528,25 +384,10 @@ extension ADBClient {
         try await shell("pm clear \(adbShellQuote(packageName))")
     }
 
-    func getAppInfo(_ packageName: String) async throws -> String {
-        try await shell("dumpsys package \(adbShellQuote(packageName))")
-    }
-
 }
 
 extension ADBClient {
     // MARK: - File Operations
-
-    func listDirectory(_ path: String) async throws -> String {
-        var directoryPath = path
-        while directoryPath.count > 1, directoryPath.hasSuffix("/") {
-            directoryPath.removeLast()
-        }
-        if directoryPath != "/" {
-            directoryPath.append("/")
-        }
-        return try await shell("ls -la -- \(adbShellQuote(directoryPath))")
-    }
 
     /// List a directory using ADB's binary SYNC LIST protocol. Unlike `ls`,
     /// this preserves spaces, newlines, locale-independent metadata, and file
@@ -619,18 +460,6 @@ extension ADBClient {
             where message.hasPrefix("Exit status 13:") {
             throw ADBError.fileTransferFailed("Open failed for \(path): Permission denied")
         }
-    }
-
-    func pushFile(localPath: String, remotePath: String) async throws {
-        let url: URL
-        if localPath.hasPrefix("file://"), let fileURL = URL(string: localPath) {
-            url = fileURL
-        } else if localPath.hasPrefix("/") {
-            url = URL(fileURLWithPath: localPath)
-        } else {
-            throw ADBError.fileTransferFailed("Invalid local path")
-        }
-        try await pushFile(from: url, to: remotePath)
     }
 
     /// Stream a local file to adbd without loading the whole file into memory.

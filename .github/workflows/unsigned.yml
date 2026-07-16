@@ -1,0 +1,15 @@
+name: Unsigned IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    uses: ./.github/workflows/reusable-unsigned.yml
+    with:
+      build_number: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}

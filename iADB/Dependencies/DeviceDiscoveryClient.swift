@@ -23,32 +23,6 @@ extension DeviceDiscoveryClient: DependencyKey {
         )
     }
 
-    static var previewValue: Self {
-        Self(
-            start: { _ in
-                AsyncStream { continuation in
-                    continuation.yield(.devices([
-                        DiscoveredDevice(
-                            id: "preview-1",
-                            name: "Pixel 7",
-                            host: "192.168.1.42",
-                            port: 38745,
-                            isPaired: true
-                        ),
-                        DiscoveredDevice(
-                            id: "preview-2",
-                            name: "Galaxy S24",
-                            host: "192.168.1.55",
-                            port: 42100,
-                            isPaired: false
-                        )
-                    ]))
-                }
-            },
-            stop: {}
-        )
-    }
-
     static var testValue: Self {
         Self(
             start: { _ in AsyncStream { $0.finish() } },

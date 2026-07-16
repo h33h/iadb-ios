@@ -1,0 +1,19 @@
+name: Set up Xcode project
+description: Verify Xcode, install XcodeGen when needed, and generate the project.
+
+runs:
+  using: composite
+  steps:
+    - name: Verify Xcode
+      shell: bash
+      run: |
+        xcodebuild -version
+        xcode-select -p
+
+    - name: Generate deterministic project
+      shell: bash
+      run: |
+        if ! command -v xcodegen >/dev/null 2>&1; then
+          brew install xcodegen
+        fi
+        scripts/generate-project.sh

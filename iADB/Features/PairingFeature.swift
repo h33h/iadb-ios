@@ -1,142 +1,84 @@
-import Foundation
 import ComposableArchitecture
+import Foundation
 
 @Reducer
 struct PairingFeature {
     @ObservableState
     struct State: Equatable {
-        var hostInput = ""
-        var portInput = ""
-        var pairingCode = ""
-        var pairingState: PairingState = .idle
-        var phase: Phase = .idle
+        var host = ""
+        var port = ""
+        var code = ""
+        var isPairing = false
         var pairedDeviceName: String?
         var pairedDeviceGUID: String?
-        var isPrefilled = false
-        var hostValidationError: String?
-        var portValidationError: String?
-        var codeValidationError: String?
-        /// mDNS service name спариваемого устройства (если pair вызван из discovery).
-        var serviceName: String?
-
-        var isBusy: Bool { phase == .validating || phase == .negotiating || phase == .connecting }
+        var errorMessage: String?
     }
 
-    enum PairingState: Equatable {
-        case idle
-        case pairing
-        case success(String)
-        case error(String)
-
-        var isPairing: Bool {
-            if case .pairing = self { return true }
-            return false
-        }
-
-        var isSuccess: Bool {
-            if case .success = self { return true }
-            return false
-        }
-    }
-
-    enum Phase: Equatable {
-        case idle
-        case validating
-        case negotiating
-        case connecting
-    }
-
-    enum Action: BindableAction {
-        case binding(BindingAction<State>)
-        case pairWithCode
-        case pairingResult(Result<String, Error>)
-        case pairingCompleted(name: String, guid: String)
-        case cancelPairing
-        case reset
+    enum Action {
+        case setHost(String)
+        case setPort(String)
+        case setCode(String)
+        case pair
+        case completed(name: String, guid: String)
+        case failed(Error)
+        case cancel
     }
 
     private enum CancelID { case pairing }
-
     @Dependency(\.adbPairing) var adbPairing
 
     var body: some ReducerOf<Self> {
-        BindingReducer()
         Reduce { state, action in
             switch action {
-            case .binding:
-                state.pairingCode = String(state.pairingCode.filter(\.isNumber).prefix(6))
-                state.hostValidationError = nil
-                state.portValidationError = nil
-                state.codeValidationError = nil
+            case .setHost(let host):
+                state.host = host
+                state.errorMessage = nil
                 return .none
 
-            case .pairWithCode:
-                state.phase = .validating
-                let host = state.hostInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                let code = state.pairingCode.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !host.isEmpty, !code.isEmpty else {
-                    state.phase = .idle
-                    return .none
-                }
-                guard let normalizedCode = try? ADBPairing.normalizedPairingCode(code) else {
-                    state.pairingState = .error(String(localized: "Invalid pairing code"))
-                    state.codeValidationError = String(localized: "Enter the six-digit code shown on Android.")
-                    state.phase = .idle
-                    return .none
-                }
-                guard let port = LocalizedDecimalInput.positiveUInt16(state.portInput) else {
-                    state.pairingState = .error(String(localized: "Invalid port number"))
-                    state.portValidationError = String(localized: "Enter a Pairing port from 1 to 65535.")
-                    state.phase = .idle
-                    return .none
-                }
+            case .setPort(let port):
+                state.port = String(port.filter(\.isNumber).prefix(5))
+                state.errorMessage = nil
+                return .none
 
-                state.pairingState = .pairing
-                state.phase = .negotiating
-                state.hostValidationError = nil
-                state.portValidationError = nil
-                state.codeValidationError = nil
+            case .setCode(let code):
+                state.code = String(code.filter(\.isNumber).prefix(6))
+                state.errorMessage = nil
+                return .none
 
+            case .pair:
+                let host = state.host.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !host.isEmpty,
+                      let port = UInt16(state.port),
+                      let code = try? ADBPairing.normalizedPairingCode(state.code) else {
+                    state.errorMessage = "Invalid pairing address or code"
+                    return .none
+                }
+                state.isPairing = true
+                state.errorMessage = nil
                 return .run { send in
-                    let peerInfo = try await adbPairing.pair(host, port, normalizedCode)
-                    await send(.pairingCompleted(name: peerInfo.name, guid: peerInfo.guid))
-                } catch: { error, send in
-                    guard !(error is CancellationError) else { return }
-                    await send(.pairingResult(.failure(error)))
+                    do {
+                        let peer = try await adbPairing.pair(host, port, code)
+                        await send(.completed(name: peer.name, guid: peer.guid))
+                    } catch is CancellationError {
+                    } catch {
+                        await send(.failed(error))
+                    }
                 }
-                .cancellable(id: CancelID.pairing)
+                .cancellable(id: CancelID.pairing, cancelInFlight: true)
 
-            case .pairingCompleted(let name, let guid):
-                state.pairingState = .success(String(localized: "Paired with \(name)"))
-                state.phase = .connecting
+            case .completed(let name, let guid):
+                state.isPairing = false
                 state.pairedDeviceName = name
                 state.pairedDeviceGUID = guid
                 return .none
 
-            case .pairingResult(.success(let deviceName)):
-                state.pairingState = .success(String(localized: "Paired with \(deviceName)"))
-                state.phase = .connecting
-                state.pairedDeviceName = deviceName
+            case .failed(let error):
+                state.isPairing = false
+                state.errorMessage = error.localizedDescription
                 return .none
 
-            case .pairingResult(.failure(let error)):
-                state.pairingState = .error(error.localizedDescription)
-                state.phase = .idle
-                return .none
-
-            case .cancelPairing:
-                guard state.pairingState.isPairing else { return .none }
-                state.pairingState = .idle
-                state.phase = .idle
-                return .cancel(id: CancelID.pairing)
-
-            case .reset:
-                state.pairingCode = ""
-                state.pairingState = .idle
-                state.phase = .idle
-                state.hostValidationError = nil
-                state.portValidationError = nil
-                state.codeValidationError = nil
+            case .cancel:
+                state.isPairing = false
                 return .cancel(id: CancelID.pairing)
             }
         }

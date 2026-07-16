@@ -6,6 +6,8 @@ import os
 /// Handles RSA key generation and signing for ADB authentication
 final class ADBCrypto {
     private static let keyTag = "com.iadb.adbkey"
+    private static let resetMarkerService = "com.iadb.adbidentity-reset"
+    private static let resetMarkerAccount = "pending"
     private static let keySizeInBits = 2048
     private static let rsaNumWords = 64 // 2048 / 32
 
@@ -39,9 +41,31 @@ final class ADBCrypto {
 
     /// SHA256 fingerprint публичного ключа (PKCS#1 DER) — для сверки между pairing и connect.
     func publicKeyFingerprint() -> String {
+        Self.fingerprint(for: publicKey) ?? "<no-pubkey>"
+    }
+
+    static func hasStoredIdentity() -> Bool {
+        storedIdentityFingerprint() != nil
+    }
+
+    static func storedIdentityFingerprint() -> String? {
+        if let privateKey = loadPrivateKey(),
+           let publicKey = SecKeyCopyPublicKey(privateKey) {
+            return fingerprint(for: publicKey)
+        }
+        #if DEBUG
+        debugEphemeralLock.lock()
+        defer { debugEphemeralLock.unlock() }
+        return debugEphemeralKeyPair.flatMap { fingerprint(for: $0.publicKey) }
+        #else
+        return nil
+        #endif
+    }
+
+    private static func fingerprint(for publicKey: SecKey) -> String? {
         var error: Unmanaged<CFError>?
         guard let der = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
-            return "<no-pubkey>"
+            return nil
         }
         let digest = SHA256.hash(data: der)
         return digest.map { String(format: "%02x", $0) }.joined()
@@ -181,15 +205,63 @@ final class ADBCrypto {
     }
 
     static func deleteStoredIdentity() throws {
-        let certificateStatus = deleteCertificate()
         let keyStatus = deleteKeys()
         let acceptedStatuses: Set<OSStatus> = [errSecSuccess, errSecItemNotFound]
-        guard acceptedStatuses.contains(certificateStatus),
-              acceptedStatuses.contains(keyStatus) else {
+        guard acceptedStatuses.contains(keyStatus), !hasStoredIdentity() else {
             throw ADBError.cryptoError(
-                "Failed to remove the ADB identity from Keychain "
-                    + "(key: \(keyStatus), certificate: \(certificateStatus))"
+                "Failed to remove the ADB private key from Keychain (status: \(keyStatus))"
             )
+        }
+
+        // The private key is the trust-bearing identity. A stale public
+        // certificate cannot authenticate on its own, so its cleanup is best
+        // effort and must not turn a successful security reset into a failure.
+        let certificateStatus = deleteCertificate()
+        if !acceptedStatuses.contains(certificateStatus) {
+            log.warning("Could not remove stale ADB certificate: \(certificateStatus, privacy: .public)")
+        }
+    }
+
+    static func markIdentityResetPending() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: resetMarkerService,
+            kSecAttrAccount as String: resetMarkerAccount,
+            kSecValueData as String: Data([1])
+        ]
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecDuplicateItem else {
+            throw ADBError.cryptoError("Failed to record the pending ADB identity reset (status: \(status))")
+        }
+    }
+
+    static func isIdentityResetPending() throws -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: resetMarkerService,
+            kSecAttrAccount as String: resetMarkerAccount,
+            kSecReturnData as String: false
+        ]
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return true
+        case errSecItemNotFound:
+            return false
+        default:
+            throw ADBError.cryptoError("Failed to read the pending ADB identity reset (status: \(status))")
+        }
+    }
+
+    static func clearIdentityResetPending() throws {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: resetMarkerService,
+            kSecAttrAccount as String: resetMarkerAccount
+        ]
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw ADBError.cryptoError("Failed to finish the ADB identity reset (status: \(status))")
         }
     }
 

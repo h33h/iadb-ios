@@ -1,0 +1,189 @@
+name: Reusable TestFlight Upload
+
+on:
+  workflow_call:
+    inputs:
+      marketing_version:
+        description: App Store marketing version.
+        required: true
+        type: string
+      build_number:
+        description: Bundle build number.
+        required: true
+        type: string
+      apple_team_id:
+        description: Public Apple Developer Team ID.
+        required: true
+        type: string
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID:
+        required: true
+      APP_STORE_CONNECT_ISSUER_ID:
+        required: true
+      APP_STORE_CONNECT_API_PRIVATE_KEY:
+        required: true
+      SIGNING_REPO_SSH_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: macos-26
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify App Store Connect configuration
+        env:
+          APPLE_TEAM_ID: ${{ inputs.apple_team_id }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+        run: |
+          missing=0
+          for name in APPLE_TEAM_ID ASC_KEY_ID ASC_ISSUER_ID ASC_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required App Store Connect setting: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Set up Xcode project
+        uses: ./.github/actions/setup-xcode
+
+      - name: Detect central signing configuration
+        id: central-config
+        env:
+          SIGNING_REPO_SSH_KEY: ${{ secrets.SIGNING_REPO_SSH_KEY }}
+        run: |
+          if [[ -n "$SIGNING_REPO_SSH_KEY" ]]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out central signing assets
+        if: steps.central-config.outputs.configured == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: h33h/apple-signing-assets
+          ssh-key: ${{ secrets.SIGNING_REPO_SSH_KEY }}
+          persist-credentials: false
+          path: signing-assets
+          sparse-checkout: |
+            scripts
+            teams/${{ inputs.apple_team_id }}/apps/com.iadb.app/app-store
+
+      - name: Select signing source
+        id: signing-source
+        env:
+          CENTRAL_CONFIGURED: ${{ steps.central-config.outputs.configured }}
+          APPLE_TEAM_ID: ${{ inputs.apple_team_id }}
+        run: |
+          bundle="signing-assets/teams/$APPLE_TEAM_ID/apps/com.iadb.app/app-store/signing-assets.tar.age"
+          if [[ "$CENTRAL_CONFIGURED" == 'true' && -s "$bundle" ]]; then
+            echo 'mode=manual' >> "$GITHUB_OUTPUT"
+            echo "Using encrypted central signing assets from commit $(git -C signing-assets rev-parse HEAD)"
+          else
+            echo 'mode=automatic' >> "$GITHUB_OUTPUT"
+            echo '::warning::Central iADB signing bundle is not present; using ASC automatic signing fallback'
+          fi
+
+      - name: Install age
+        if: steps.signing-source.outputs.mode == 'manual'
+        run: command -v age >/dev/null 2>&1 || brew install age
+
+      - name: Decrypt central signing assets
+        if: steps.signing-source.outputs.mode == 'manual'
+        id: decrypted-signing
+        env:
+          APPLE_TEAM_ID: ${{ inputs.apple_team_id }}
+          SIGNING_REPO_SSH_KEY: ${{ secrets.SIGNING_REPO_SSH_KEY }}
+        run: |
+          identity="$RUNNER_TEMP/signing-repo-identity"
+          umask 077
+          printf '%s\n' "$SIGNING_REPO_SSH_KEY" > "$identity"
+          directory="signing-assets/teams/$APPLE_TEAM_ID/apps/com.iadb.app/app-store"
+          signing-assets/scripts/decrypt_signing_assets.sh \
+            "$directory/signing-assets.tar.age" \
+            "$directory/manifest.json" \
+            "$identity" \
+            "$RUNNER_TEMP/decrypted-signing"
+
+      - name: Install central signing material
+        if: steps.signing-source.outputs.mode == 'manual'
+        id: manual-signing
+        env:
+          SIGNING_CERTIFICATE_PATH: ${{ steps.decrypted-signing.outputs.certificate_path }}
+          SIGNING_PROFILE_PATH: ${{ steps.decrypted-signing.outputs.profile_path }}
+          SIGNING_MANIFEST_PATH: ${{ steps.decrypted-signing.outputs.private_manifest }}
+        run: scripts/install-signing-assets.sh
+
+      - name: Install App Store Connect API key
+        id: api-key
+        env:
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+        run: |
+          KEY_PATH="$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8"
+          umask 077
+          printf '%s\n' "$ASC_PRIVATE_KEY" > "$KEY_PATH"
+          grep -q 'BEGIN PRIVATE KEY' "$KEY_PATH" || {
+            echo '::error::APP_STORE_CONNECT_API_PRIVATE_KEY must contain the .p8 file contents'
+            exit 1
+          }
+          echo "path=$KEY_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Archive and upload to TestFlight
+        env:
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          APPLE_TEAM_ID: ${{ inputs.apple_team_id }}
+          ASC_KEY_PATH: ${{ steps.api-key.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          SIGNING_MODE: ${{ steps.signing-source.outputs.mode }}
+          SIGNING_KEYCHAIN_PATH: ${{ steps.manual-signing.outputs.keychain_path }}
+          SIGNING_PROFILE_NAME: ${{ steps.manual-signing.outputs.profile_name }}
+          SIGNING_CERTIFICATE_IDENTITY: ${{ steps.manual-signing.outputs.certificate_identity }}
+        run: scripts/upload-testflight.sh
+
+      - name: Remove temporary signing material
+        if: always()
+        env:
+          KEYCHAIN_PATH: ${{ steps.manual-signing.outputs.keychain_path }}
+          PROFILE_UUID: ${{ steps.manual-signing.outputs.profile_uuid }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          keychain_path="${KEYCHAIN_PATH:-$RUNNER_TEMP/app-signing.keychain-db}"
+          if [[ -e "$keychain_path" ]]; then
+            security delete-keychain "$keychain_path" 2>/dev/null || true
+          fi
+          profile_uuid="$PROFILE_UUID"
+          private_manifest="$RUNNER_TEMP/decrypted-signing/manifest.json"
+          if [[ -z "$profile_uuid" && -s "$private_manifest" ]]; then
+            profile_uuid=$(jq -r '.profile_uuid // empty' "$private_manifest")
+          fi
+          if [[ -n "$profile_uuid" ]]; then
+            rm -f "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles/$profile_uuid.mobileprovision"
+          fi
+          rm -rf "$RUNNER_TEMP/decrypted-signing"
+          rm -f \
+            '${{ steps.api-key.outputs.path }}' \
+            "$RUNNER_TEMP/AuthKey_$ASC_KEY_ID.p8" \
+            "$RUNNER_TEMP/signing-repo-identity"
+
+      - name: Upload TestFlight diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testflight-diagnostics-${{ inputs.build_number }}
+          path: |
+            build/testflight/archive.log
+            build/testflight/upload.log
+          if-no-files-found: ignore
+          retention-days: 14

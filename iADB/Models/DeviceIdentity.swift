@@ -1,12 +1,5 @@
 import Foundation
 
-struct Endpoint: Equatable, Codable, Hashable, Sendable {
-    var host: String
-    var port: UInt16
-
-    var displayValue: String { "\(host):\(port)" }
-}
-
 struct DeviceIdentity: Equatable, Codable, Hashable, Sendable {
     static let unknownID = "unknown"
 
@@ -18,10 +11,11 @@ struct DeviceIdentity: Equatable, Codable, Hashable, Sendable {
         from device: DiscoveredDevice,
         pairedDevices: [PairedDevice]
     ) -> Self {
-        let paired = ConnectionFeature.State.pairedDevice(
-            matching: device,
-            in: pairedDevices
-        )
+        let paired = pairedDevices.first {
+            (!$0.guid.isEmpty && $0.guid == device.id) ||
+            ($0.serviceName != nil && $0.serviceName == device.id) ||
+            ($0.lastHost == device.host && ($0.lastPort == nil || $0.lastPort == device.port))
+        }
         if let guid = paired?.guid, !guid.isEmpty {
             return Self(
                 stableID: "guid:\(guid)",
@@ -44,112 +38,26 @@ struct DeviceIdentity: Equatable, Codable, Hashable, Sendable {
             adbFingerprint: nil
         )
     }
-}
 
-struct DestructiveActionConfirmation: Equatable, Sendable {
-    var deviceID: String
-    var transportGeneration: Int
-    var objectID: String
-    var confirmedAt: Date
-}
-
-struct RemoteDeviceTarget: Equatable, Sendable {
-    var deviceID: String
-    var deviceName: String
-    var transportGeneration: Int
-    var switchedAt: Date
-    var isConnected: Bool
-
-    static let unavailable = Self(
-        deviceID: DeviceIdentity.unknownID,
-        deviceName: String(localized: "Unknown device"),
-        transportGeneration: 0,
-        switchedAt: .distantPast,
-        isConnected: false
-    )
-
-    func confirmation(for objectID: String, at date: Date = Date()) -> DestructiveActionConfirmation? {
-        guard isConnected, deviceID != DeviceIdentity.unknownID else { return nil }
-        return DestructiveActionConfirmation(
-            deviceID: deviceID,
-            transportGeneration: transportGeneration,
-            objectID: objectID,
-            confirmedAt: date
+    static func resolved(from device: PairedDevice) -> Self {
+        if !device.guid.isEmpty {
+            return Self(
+                stableID: "guid:\(device.guid)",
+                displayName: device.displayName,
+                adbFingerprint: device.guid
+            )
+        }
+        if let serviceName = device.serviceName, !serviceName.isEmpty {
+            return Self(
+                stableID: "service:\(serviceName)",
+                displayName: device.displayName,
+                adbFingerprint: nil
+            )
+        }
+        return Self(
+            stableID: "service:saved-\(device.id.uuidString)",
+            displayName: device.displayName,
+            adbFingerprint: nil
         )
     }
-
-    func accepts(_ confirmation: DestructiveActionConfirmation, objectID: String) -> Bool {
-        isConnected &&
-            confirmation.deviceID == deviceID &&
-            confirmation.transportGeneration == transportGeneration &&
-            confirmation.objectID == objectID &&
-            confirmation.confirmedAt >= switchedAt
-    }
-}
-
-enum SessionDisconnectReason: Equatable, Sendable {
-    case userInitiated
-    case transport(String)
-    case connectionFailed(String)
-    case rebooting
-}
-
-enum DeviceTransportState: Equatable, Sendable {
-    case noDevice
-    case paired
-    case connecting
-    case connected(endpoint: Endpoint, since: Date)
-    case reconnecting(attempt: Int, lastEndpoint: Endpoint?)
-    case disconnected(reason: SessionDisconnectReason, lastSeen: Date?)
-}
-
-struct DisabledReason: Equatable, Sendable {
-    var message: String
-}
-
-struct DeviceCapabilities: Equatable, Sendable {
-    var canReadRemoteFiles: Bool
-    var canWriteRemoteFiles: Bool
-    var canRunCommand: Bool
-    var canCaptureLogcat: Bool
-    var canInstallAPK: Bool
-    var canCaptureScreen: Bool
-    var canReboot: Bool
-
-    static let offline = Self(
-        canReadRemoteFiles: false,
-        canWriteRemoteFiles: false,
-        canRunCommand: false,
-        canCaptureLogcat: false,
-        canInstallAPK: false,
-        canCaptureScreen: false,
-        canReboot: false
-    )
-
-    static let connected = Self(
-        canReadRemoteFiles: true,
-        canWriteRemoteFiles: true,
-        canRunCommand: true,
-        canCaptureLogcat: true,
-        canInstallAPK: true,
-        canCaptureScreen: true,
-        canReboot: true
-    )
-
-    static let disconnectedReason = DisabledReason(
-        message: String(localized: "Reconnect the selected Android device to use this action.")
-    )
-}
-
-enum RemoteWorkspaceSnapshot: String, Equatable, Hashable, Sendable {
-    case device
-    case files
-    case apps
-    case logcat
-}
-
-struct RemoteSnapshotRelationship: Equatable, Sendable {
-    var deviceID: String
-    var fetchedAt: Date
-    var isStale: Bool
 }

@@ -1,1 +1,0 @@
-debugging,shell,terminal,logcat,files,device,remote,testing,apk,pairing,network,console

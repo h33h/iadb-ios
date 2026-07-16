@@ -24,8 +24,6 @@
 	<true/>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<true/>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>iADB saves Android device screenshots to your photo library when you choose Save to Photos.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>iADB needs access to your local network to connect to Android devices via WiFi ADB.</string>
 	<key>NSBonjourServices</key>

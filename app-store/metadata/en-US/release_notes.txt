@@ -1,9 +1,0 @@
-iADB now uses the Precision Utility workspace design.
-
-- iPhone keeps five focused tabs, while iPad adds a sidebar, tables, and inspectors.
-- Device Context stays visible across remote workspaces and preserves your current path, filters, drafts, logs, and local screenshots after a disconnect.
-- Activity Center tracks file transfers, APK installs, screen captures, and exports without blocking the rest of a workspace.
-- Files and Apps support denser selection workflows. Command Runner streams output and supports Stop. Logcat keeps capture separate from viewport follow.
-- Screens adds bulk actions, comparison, storage usage controls, and an offline local gallery.
-
-This update also improves VoiceOver labels, Accessibility text layouts, keyboard commands, Increased Contrast, and Reduce Motion behavior.

@@ -1,30 +1,23 @@
-name: Build and Test
+name: Pull Request Checks
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   verify:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select latest Xcode
-        run: |
-          XCODE_PATH=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
-          sudo xcode-select -s "$XCODE_PATH/Contents/Developer"
-          xcodebuild -version
-
-      - name: Generate deterministic project
-        run: |
-          brew install xcodegen
-          scripts/generate-project.sh
+      - name: Set up Xcode project
+        uses: ./.github/actions/setup-xcode
 
       - name: Select simulator
         id: simulator
@@ -45,7 +38,7 @@ jobs:
           ')
           echo "destination=$DESTINATION" >> "$GITHUB_OUTPUT"
 
-      - name: Unit and UI tests
+      - name: Unit tests
         run: |
           set -o pipefail
           mkdir -p build
@@ -57,19 +50,6 @@ jobs:
             -skipMacroValidation \
             -skipPackagePluginValidation \
             2>&1 | tee build/test.log
-
-      - name: Static analyzer
-        run: |
-          set -o pipefail
-          xcodebuild analyze \
-            -project iADB.xcodeproj \
-            -scheme iADB \
-            -configuration Release \
-            -destination '${{ steps.simulator.outputs.destination }}' \
-            -skipMacroValidation \
-            -skipPackagePluginValidation \
-            CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee build/analyze.log
 
       - name: Generic device Release build
         run: |

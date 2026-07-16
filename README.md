@@ -1,165 +1,29 @@
 # iADB
 
-[![Build & Test](https://github.com/h33h/iadb-ios/actions/workflows/build.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/build.yml)
-[![App Store Release](https://github.com/h33h/iadb-ios/actions/workflows/release.yml/badge.svg)](https://github.com/h33h/iadb-ios/actions/workflows/release.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+The repository currently contains the ADB protocol implementation and a small,
+UI-independent business layer. The presentation layer was intentionally removed
+and will be rebuilt from scratch.
 
-<p align="center">
-  <img src="app-store/icon/AppIcon-1024.png" alt="iADB icon showing Android and a terminal inside an iPhone" width="144" />
-</p>
+## Business modules
 
-Run Android Wireless Debugging workflows from an iPhone or iPad.
+- Wireless discovery, pairing, connection, and saved devices
+- Device information
+- Installed-app operations
+- Remote file operations
+- Shell v2 command streaming and history
+- Logcat streaming
+- Screenshot capture and local persistence
 
-`iADB` discovers Android devices on local Wi-Fi, pairs through Wireless Debugging, and gives you common ADB tools without a desktop computer. The app uses no account, ads, analytics, tracking, or developer-operated relay.
+`iADBApp.swift` contains only an `EmptyView` bootstrap so the application target
+continues to compile while the new UI is being designed.
 
-## Highlights
+## Build and test
 
-- Five focused iPhone tabs and an iPad sidebar with tables and inspectors
-- Pairing-code flow, local discovery, manual endpoints, and quick reconnect
-- Persistent Device Context and an Activity Center for remote operations
-- Native SwiftUI interface with Dynamic Type, VoiceOver, contrast, and motion support
-- Command Runner and Logcat share one Console without mixing their state
-- Release workflow for signed archives, App Store validation, and optional TestFlight upload
-
-## Features
-
-| Area | Available actions |
-| --- | --- |
-| Device | Discover, pair, connect, reconnect, inspect device details, and manage saved connections. |
-| Files | Browse paths, preview and download files, upload content, create folders or files, rename, move, duplicate, and delete. |
-| Apps | Search, filter, and sort packages; install APKs; launch, force stop, clear data, or uninstall apps. |
-| Console | Stream and stop one-shot commands, reuse or pin device-scoped history, filter Logcat, pause viewport follow without stopping capture, and export reviewed log scopes. |
-| Screens | Capture, inspect, compare, zoom, share, copy, save, and delete device-scoped Android screenshots. |
-
-## Screenshots
-
-All repository captures use the deterministic, fictional App Store fixture.
-
-| Device | Files | Command Runner |
-| --- | --- | --- |
-| <img src="app-store/screenshots/iphone-6.9/01-device.png" alt="Connected Android device dashboard" width="220" /> | <img src="app-store/screenshots/iphone-6.9/02-files.png" alt="Android file manager" width="220" /> | <img src="app-store/screenshots/iphone-6.9/03-shell.png" alt="One-shot command history and pinned commands" width="220" /> |
-
-| Apps | Logs | Screens |
-| --- | --- | --- |
-| <img src="app-store/screenshots/iphone-6.9/04-apps.png" alt="Installed app library" width="220" /> | <img src="app-store/screenshots/iphone-6.9/05-logs.png" alt="Live filtered Logcat output" width="220" /> | <img src="app-store/screenshots/iphone-6.9/06-screens.png" alt="Android screenshot gallery" width="220" /> |
-
-## Getting Started
-
-### Requirements
-
-- Xcode 26+
-- iOS 17+
-- Homebrew
-- `xcodegen`
-
-### Local Setup
-
-1. Install `xcodegen`:
-
-```bash
-brew install xcodegen
-```
-
-2. Generate the Xcode project:
-
-```bash
-scripts/generate-project.sh
-```
-
-3. Open `iADB.xcodeproj` in Xcode.
-4. Build and run the `iADB` scheme.
-
-### Deterministic Demo Device
-
-To explore every workspace without Android hardware, add this launch argument
-to **Product › Scheme › Edit Scheme… › Run › Arguments**:
-
-```text
---iadb-fixture=connected
-```
-
-The Debug build opens the fictional `Demo Android` device with populated Files,
-Apps, Command Runner, Logcat and Screens data. Add `--iadb-root=files` (or
-`device`, `apps`, `console`, `screens`) to start in a specific workspace. Use
-`--iadb-fixture=first-launch` to inspect the connection-first onboarding flow.
-
-## Running Tests
-
-```bash
-scripts/generate-project.sh
-xcodebuild test \
+```sh
+xcodegen generate
+xcodebuild \
   -project iADB.xcodeproj \
   -scheme iADB \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'
+  -destination 'platform=iOS Simulator,name=iADB Audit iPad mini' \
+  test CODE_SIGNING_ALLOWED=NO
 ```
-
-## Debug Android Emulator Mode
-
-Debug builds include an Android Emulator panel under Device › Settings for production-like checks against a local emulator.
-
-Use the `iADB Android Emulator` scheme or enable `Use Android Emulator` in that panel. When the configured ADB endpoint is reachable, iADB injects a synthetic discovered device. `ADBClient` stays live, so connect, shell, files, apps, logcat, and screenshots still use the real ADB protocol.
-
-Defaults:
-
-- Host: `127.0.0.1`
-- Port: `5555`
-- Launch argument: `--iadb-debug-android-emulator`
-- Environment overrides: `IADB_DEBUG_ANDROID_HOST`, `IADB_DEBUG_ANDROID_PORT`
-
-## How To Connect
-
-1. Enable Developer Options on the Android device.
-2. Enable `Wireless debugging`.
-3. Open `Pair device with pairing code` on Android.
-4. In `iADB`, tap `Connect a Device`, choose the discovered device or tap `Pair Device`.
-5. Enter the pairing code and connect.
-
-Both devices must be on the same Wi-Fi network.
-
-## Tech Stack
-
-- SwiftUI
-- The Composable Architecture
-- XcodeGen
-- GitHub Actions
-
-## CI
-
-GitHub Actions provide:
-
-- build and test on pull requests and pushes to `main`
-- signed App Store archive, validation, and optional TestFlight upload from version tags or a manual run
-
-The release workflow needs Apple signing and App Store Connect secrets before it can create or upload a signed build.
-
-## Release Resources
-
-- [App Store assets and screenshot capture](app-store/README.md)
-- [Release checklist](app-store/RELEASE_CHECKLIST.md)
-- [Privacy policy](PRIVACY.md)
-- [Support](SUPPORT.md)
-
-Regenerate the App Store screenshots or run the offline release gate from the repository root:
-
-```bash
-scripts/capture-app-store-screenshots.sh
-scripts/validate-app-store-release.sh
-```
-
-## Project Layout
-
-- `iADB/` app source code
-- `iADBTests/` unit and feature tests
-- `iADBUITests/` UI and App Store screenshot tests
-- `.github/workflows/` CI pipelines
-- `scripts/` project, test, screenshot, and release tools
-- `app-store/` icon, screenshots, metadata, and release checklist
-- `design-system/` UI principles and design tokens
-
-## Contributing
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for local setup and pull request expectations.
-
-## License
-
-Released under the [MIT License](LICENSE).

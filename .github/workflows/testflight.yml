@@ -1,0 +1,30 @@
+name: TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: App Store version, for example 1.0.0
+        required: true
+        default: 1.0.0
+        type: string
+
+concurrency:
+  group: app-store-upload
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    uses: ./.github/workflows/reusable-testflight.yml
+    with:
+      marketing_version: ${{ inputs.marketing_version }}
+      build_number: ${{ format('{0}.{1}', github.run_id, github.run_attempt) }}
+      apple_team_id: ${{ vars.APPLE_TEAM_ID }}
+    secrets:
+      APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      APP_STORE_CONNECT_API_PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_API_PRIVATE_KEY }}
+      SIGNING_REPO_SSH_KEY: ${{ secrets.SIGNING_REPO_SSH_KEY }}

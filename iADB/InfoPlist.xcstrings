@@ -13,24 +13,31 @@
       },
       "shouldTranslate" : false
     },
+    "CFBundleName" : {
+      "comment" : "Bundle name",
+      "extractionState" : "extracted_with_value",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "iADB"
+          }
+        }
+      }
+    },
     "NSLocalNetworkUsageDescription" : {
       "comment" : "Explains why iADB needs local-network access.",
       "localizations" : {
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iADB needs access to your local network to connect to Android devices via WiFi ADB."
+            "value" : "iADB needs local network access to discover, pair with, and connect to Android devices using Wireless debugging."
           }
-        }
-      }
-    },
-    "NSPhotoLibraryAddUsageDescription" : {
-      "comment" : "Explains why iADB needs add-only Photos access.",
-      "localizations" : {
-        "en" : {
+        },
+        "ru" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "iADB saves Android device screenshots to your photo library when you choose Save to Photos."
+            "value" : "iADB требуется доступ к локальной сети, чтобы искать, сопрягать и подключать устройства Android через Wireless debugging."
           }
         }
       }

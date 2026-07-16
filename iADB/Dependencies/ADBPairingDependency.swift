@@ -15,14 +15,6 @@ extension ADBPairingDependency: DependencyKey {
         )
     }
 
-    static var previewValue: Self {
-        Self(
-            pair: { _, _, _ in
-                ADBPairing.PeerInfo(name: "Preview Device", guid: "preview-device-guid")
-            }
-        )
-    }
-
     static var testValue: Self {
         Self(
             pair: unimplemented("ADBPairingDependency.pair")

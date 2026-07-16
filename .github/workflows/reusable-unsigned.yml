@@ -1,0 +1,52 @@
+name: Reusable Unsigned IPA
+
+on:
+  workflow_call:
+    inputs:
+      marketing_version:
+        description: Optional version override. The project version is used when empty.
+        required: false
+        default: ''
+        type: string
+      build_number:
+        description: Bundle build number.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Xcode project
+        uses: ./.github/actions/setup-xcode
+
+      - name: Build unsigned IPA
+        id: package
+        env:
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+        run: scripts/build-unsigned-ipa.sh
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: iADB-unsigned-${{ inputs.build_number }}
+          path: ${{ steps.package.outputs.ipa_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-build-log-${{ inputs.build_number }}
+          path: build/unsigned/build.log
+          if-no-files-found: ignore
+          retention-days: 14

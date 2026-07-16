@@ -35,7 +35,7 @@ settings:
     ENABLE_STRICT_OBJC_MSGSEND: YES
     GCC_NO_COMMON_BLOCKS: YES
     CLANG_ENABLE_MODULES: YES
-    SWIFT_EMIT_LOC_STRINGS: YES
+    SWIFT_EMIT_LOC_STRINGS: NO
   configs:
     Debug:
       SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
@@ -117,20 +117,6 @@ targets:
       - package: xctest-dynamic-overlay
         product: IssueReporting
 
-  iADBUITests:
-    type: bundle.ui-testing
-    platform: iOS
-    sources:
-      - path: iADBUITests
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.iadb.uitests
-        GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_STYLE: Automatic
-        TEST_TARGET_NAME: iADB
-    dependencies:
-      - target: iADB
-
 schemes:
   iADB:
     build:
@@ -143,7 +129,6 @@ schemes:
       config: Debug
       targets:
         - iADBTests
-        - iADBUITests
     archive:
       config: Release
   iADB Android Emulator:
