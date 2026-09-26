@@ -137,7 +137,7 @@ public final class ADBServiceBrowser: @unchecked Sendable {
 
                         guard Self.matchesServiceName(name, target: serviceName) else { continue }
 
-                        let connection = NWConnection(to: result.endpoint, using: NWParameters())
+                        let connection = NWConnection(to: result.endpoint, using: .tcp)
                         guard session.attach(resolver: connection, endpoint: result.endpoint) else {
                             connection.cancel()
                             continue

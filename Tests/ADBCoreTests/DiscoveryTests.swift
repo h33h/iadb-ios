@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Testing
 @testable import ADBCore
 
@@ -25,6 +26,41 @@ struct DiscoveryTests {
     func qrServiceNameMustMatchExactly() {
         #expect(ADBServiceBrowser.matchesServiceName("pixel", target: "pixel._adb-tls-pairing._tcp."))
         #expect(!ADBServiceBrowser.matchesServiceName("pixel-2", target: "pixel"))
+    }
+
+    @Test("Поиск сопряжения разрешает объявленную TCP-службу")
+    func pairingBrowserResolvesAdvertisedTCPService() async throws {
+        let serviceName = "iadb-browser-\(UUID().uuidString)"
+        let listener = try NWListener(using: .tcp, on: .any)
+        let queue = DispatchQueue(label: "com.iadb.tests.pairing-browser")
+        listener.service = NWListener.Service(
+            name: serviceName,
+            type: "_adb-tls-pairing._tcp",
+            domain: "local."
+        )
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: queue)
+        }
+        listener.start(queue: queue)
+        defer { listener.cancel() }
+
+        var listenerReady = false
+        for _ in 0..<100 {
+            if case .ready = listener.state {
+                listenerReady = true
+                break
+            }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(listenerReady)
+        let expectedPort = try #require(listener.port?.rawValue)
+
+        let endpoint = try await ADBServiceBrowser().discoverPairingService(
+            serviceName: serviceName,
+            timeout: 5
+        )
+        #expect(endpoint.port == expectedPort)
+        #expect(!endpoint.host.isEmpty)
     }
 }
 
